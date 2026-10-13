@@ -428,6 +428,19 @@ DONE_TIMEOUT_S = 0.500
 # (serialhdl.py:171-180) and then has 5 s to identify (serialhdl.py:97).
 IDENTIFY_TIMEOUT_S = 100.0
 LOCK_ACK_TIMEOUT_S = 5.0
+# After a Dwarf's clock sync has connected, the next Dwarf is booted only
+# once this one's frequency estimate has settled (owner 10/13; the March
+# 5-tool build's "clock-sync convergence window").  A boot right after a
+# connect delayed the new Dwarf's first get_clock samples and its estimate
+# read low at Klipper's ready check (mcu.py _ready, 1 % / MHz rounding):
+# 74 starts 10/10-10/13, the Dwarf booted just before the last read 55.81-
+# 55.95 MHz, once 55.33 = "configured for 56Mhz but running at 55Mhz"; the
+# crystal measures 56.000.  Settled = this many NEW estimates in a row
+# (clocksync.py _handle_clock replaces clock_est per accepted sample; the
+# one connect() leaves is CLOCK_FREQ itself) within the tolerance.
+CLOCK_SETTLE_TOL = 0.001
+CLOCK_SETTLE_SAMPLES = 2
+CLOCK_SETTLE_TIMEOUT_S = 10.0
 
 # serial_bridge_done status values (fw l.2103-2108) plus one of our own
 # for "no done came back".  Everything but DONE_OK means nothing (or not
@@ -800,12 +813,46 @@ class BridgeEngine:
             if ch.state == 'sync':
                 cs = getattr(ch.mcu_obj, '_clocksync', None)
                 if getattr(cs, 'get_clock_cmd', None) is not None:
-                    self._release(ch)
-                    continue
+                    # connected: the other Dwarfs are served again (the
+                    # lock is done), the next boot waits for the estimate
+                    ch.state = 'settle'
+                    ch.state_deadline = (self.reactor.monotonic()
+                                         + CLOCK_SETTLE_TIMEOUT_S)
+                    ch.settle_start = self.reactor.monotonic()
+                    ch.settle_est = cs.clock_est
+                    ch.settle_good = 0
+                    if self._exclusive is ch:
+                        self._exclusive = None
+                        self.kick()
                 if self.reactor.monotonic() > ch.state_deadline:
                     logging.warning("SerialBridge [%s]: Dwarf %d clock sync not"
                                     " finished within %.0f s; releasing the bus",
                                     ch.name, ch.dwarf_index, IDENTIFY_TIMEOUT_S)
+                    self._release(ch)
+                    continue
+                return True
+            if ch.state == 'settle':
+                cs = ch.mcu_obj._clocksync
+                est = cs.clock_est
+                if est is not ch.settle_est:          # a new accepted sample
+                    ch.settle_est = est
+                    if abs(est[2] - cs.mcu_freq) <= CLOCK_SETTLE_TOL * cs.mcu_freq:
+                        ch.settle_good += 1
+                    else:
+                        ch.settle_good = 0
+                now = self.reactor.monotonic()
+                if ch.settle_good >= CLOCK_SETTLE_SAMPLES:
+                    logging.info("SerialBridge [%s]: Dwarf %d clock settled at"
+                                 " %.4f MHz after %.1f s", ch.name,
+                                 ch.dwarf_index, est[2] / 1e6,
+                                 now - ch.settle_start)
+                    self._release(ch)
+                    continue
+                if now > ch.state_deadline:
+                    logging.warning("SerialBridge [%s]: Dwarf %d clock not"
+                                    " settled within %.0f s (%.4f MHz);"
+                                    " going on", ch.name, ch.dwarf_index,
+                                    CLOCK_SETTLE_TIMEOUT_S, est[2] / 1e6)
                     self._release(ch)
                     continue
                 return True
@@ -1206,7 +1253,8 @@ class BridgeChannel:
         self.active = False       # a session has written to the PTY
         self.booted = False
         self.published = False    # symlink exists
-        # boot -> identify -> lock -> ready (BridgeEngine._bring_up)
+        # boot -> identify -> lock -> sync -> settle -> ready
+        # (BridgeEngine._bring_up)
         self.state = 'boot'
         self.state_deadline = 0.
         self.locked = False
