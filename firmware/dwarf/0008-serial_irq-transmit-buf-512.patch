@@ -1,0 +1,74 @@
+--- a/src/generic/serial_irq.c
++++ b/src/generic/serial_irq.c
+@@ -17,11 +17,17 @@
+ #define RX_BUFFER_SIZE 192
+ 
+ static uint8_t receive_buf[RX_BUFFER_SIZE], receive_pos;
+-// KlipperXL+ (2026-10-03): 192, not 96 - an RS485-bridged Dwarf can only send
+-// when the XLBuddy addresses it, so this buffer is what one poll can carry.
+-// 192 = the Dwarf TX window cap (0004 TX_WINDOW_MAX_BYTES) and the XLBuddy
+-// capture (xlplus_rs485.c BRIDGE_RX_MAX); positions stay uint8_t-safe.
+-static uint8_t transmit_buf[192], transmit_pos, transmit_max;
++// KlipperXL+: an RS485-bridged Dwarf can only send when the XLBuddy polls it
++// (0004 TX window, <= 192 bytes per poll), so everything it produces between
++// two polls waits here; a full buffer drops the next message silently.
++// 2026-10-03: 96 -> 192.  2026-10-04: 192 -> 512, measured: a streaming
++// Dwarf averages ~2.4 KB/s but bursts to 7.5 KB/s, and the gap between its
++// polls reaches ~35-40 ms (worst ~300 B); a pick briefly leaves it waiting
++// up to 256 ms at ~660 B/s (~170 B).  192 bytes filled up; 512 covers both
++// with ~1.7x to spare.  The positions are 16 bit (readw/writew); a 16-bit
++// aligned access is a single instruction, as the 8-bit ones were.
++static uint8_t transmit_buf[512];
++static uint16_t transmit_pos, transmit_max;
+ 
+ DECL_CONSTANT("SERIAL_BAUD", CONFIG_SERIAL_BAUD);
+ DECL_CONSTANT("RECEIVE_WINDOW", RX_BUFFER_SIZE);
+@@ -98,34 +104,37 @@
+ console_sendf(const struct command_encoder *ce, va_list args)
+ {
+     // Verify space for message
+-    uint_fast8_t tpos = readb(&transmit_pos), tmax = readb(&transmit_max);
++    uint_fast16_t tpos = readw(&transmit_pos), tmax = readw(&transmit_max);
+     if (tpos >= tmax) {
+         tpos = tmax = 0;
+-        writeb(&transmit_max, 0);
+-        writeb(&transmit_pos, 0);
++        writew(&transmit_max, 0);
++        writew(&transmit_pos, 0);
+     }
+     if (tmax + READP(ce->max_size) > sizeof(transmit_buf)) {
+         if (tmax - tpos + READP(ce->min_size) > sizeof(transmit_buf))
+             // Not enough space for message
+             return;
+         // Disable TX irq and move buffer
+-        writeb(&transmit_max, 0);
+-        tpos = readb(&transmit_pos);
++        writew(&transmit_max, 0);
++        tpos = readw(&transmit_pos);
+         tmax -= tpos;
+         memmove(&transmit_buf[0], &transmit_buf[tpos], tmax);
+-        writeb(&transmit_pos, 0);
+-        writeb(&transmit_max, tmax);
++        writew(&transmit_pos, 0);
++        writew(&transmit_max, tmax);
+         serial_enable_tx_irq();
+     }
+ 
+-    // Generate message
++    // Generate message (command_encode_and_frame takes a uint_fast8_t
++    // size; one message is at most MESSAGE_MAX, so cap what is passed)
+     uint8_t *buf = &transmit_buf[tmax];
+-    uint_fast8_t msglen = command_encode_and_frame(
+-        buf, sizeof(transmit_buf) - tmax, ce, args);
++    uint_fast16_t space = sizeof(transmit_buf) - tmax;
++    if (space > 255)
++        space = 255;
++    uint_fast8_t msglen = command_encode_and_frame(buf, space, ce, args);
+     if (!msglen)
+         return;
+ 
+     // Start message transmit
+-    writeb(&transmit_max, tmax + msglen);
++    writew(&transmit_max, tmax + msglen);
+     serial_enable_tx_irq();
+ }

@@ -1,0 +1,80 @@
+diff --git a/src/stm32/Kconfig b/src/stm32/Kconfig
+index a0a1ae2..8df4db6 100644
+--- a/src/stm32/Kconfig
++++ b/src/stm32/Kconfig
+@@ -239,6 +239,7 @@ config FLASH_BOOT_ADDRESS
+ 
+ config RAM_START
+     hex
++    default 0x20000004 if STM32G0_PRUSA_APP_ARGS
+     default 0x20000000
+ 
+ config RAM_SIZE
+@@ -256,6 +257,7 @@ config RAM_SIZE
+     default 0x10000 if MACH_STM32F401
+     default 0x20000 if MACH_STM32F4x5 || MACH_STM32F446
+     default 0x80000 if MACH_STM32F765
++    default 0x8ffc if MACH_STM32G07x && STM32G0_PRUSA_APP_ARGS
+     default 0x9000 if MACH_STM32G07x
+     default 0x24000 if MACH_STM32G0Bx
+     default 0x20000 if MACH_STM32H7
+@@ -386,6 +388,18 @@ config STM32G0_PRUSA_PUPPY_CLOCK
+         PLLN x70, PLLR /5, SYSCLK 56MHz (src/device/stm32g0/core_init.cpp).
+         Without this a 12MHz STM32G07x runs the generic 64MHz tree.
+ 
++config STM32G0_PRUSA_APP_ARGS
++    bool "Keep the Prusa bootloader's startup argument (puppy address)" if LOW_LEVEL_OPTIONS
++    depends on MACH_STM32G07x && FLASH_APPLICATION_ADDRESS != 0x8000000
++    default y if STM32G0_PRUSA_PUPPY_CLOCK
++    help
++        The Prusa puppy bootloader passes the bus address it assigned to
++        the board in the first RAM byte, 0x20000000 (Prusa-Firmware-Buddy
++        src/device/stm32g0/linker/stm32g070rb_boot.ld section .app_args,
++        src/puppy/shared/startup/ApplicationStartupArguments.cpp).  This
++        moves Klipper's RAM up 4 bytes so its startup code does not
++        overwrite that byte, and reports it (get_boot_address).
++
+ config STM32F0_TRIM
+     int "Internal clock trim override" if LOW_LEVEL_OPTIONS && MACH_STM32F0 && STM32_CLOCK_REF_INTERNAL && !USBSERIAL
+     default 16
+diff --git a/src/stm32/stm32f0_serial.c b/src/stm32/stm32f0_serial.c
+index af74a79..d4d907c 100644
+--- a/src/stm32/stm32f0_serial.c
++++ b/src/stm32/stm32f0_serial.c
+@@ -513,6 +513,25 @@ command_set_serial_address(uint32_t *args)
+ DECL_COMMAND(command_set_serial_address, "set_serial_address address=%u");
+ #endif
+ 
++#if RS485_GATED && CONFIG_STM32G0_PRUSA_APP_ARGS
++// Prusa bootloader -> application handoff: the bootloader leaves the bus
++// address it assigned to this puppy (0x0A + Dwarf number, 0x0B-0x0F) in
++// the first RAM byte, struct ApplicationStartupArguments in section
++// .app_args at ORIGIN(RAM) (Prusa-Firmware-Buddy 6.4.0
++// stm32g070rb_boot.ld:159-164, ApplicationStartupArguments.cpp:6-21).
++// CONFIG_RAM_START is 4 bytes past it, so .data/.bss never touch it.
++#define PRUSA_APP_ARGS_ADDR 0x20000000
++static uint8_t boot_address;
++
++void
++command_get_boot_address(uint32_t *args)
++{
++    sendf("boot_address address=%c", boot_address);
++}
++DECL_COMMAND_FLAGS(command_get_boot_address, HF_IN_SHUTDOWN,
++                   "get_boot_address");
++#endif
++
+ void
+ serial_enable_tx_irq(void)
+ {
+@@ -567,6 +586,10 @@ serial_init(void)
+     USARTx->RTOR = 500;
+     USARTx->CR2 |= USART_CR2_RTOEN;         // Enable receiver timeout
+ 
++#if CONFIG_STM32G0_PRUSA_APP_ARGS
++    boot_address = *(volatile uint8_t *)PRUSA_APP_ARGS_ADDR;
++#endif
++
+     // First byte after boot is always an address byte.
+     // RTOR will maintain this between subsequent frames.
+     expect_address = 1;

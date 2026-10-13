@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bedlet Grid</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #1e1e2e;
+    color: #cdd6f4;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: 8px;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 460px;
+  }
+
+  .header {
+    text-align: center;
+    margin-bottom: 8px;
+  }
+
+  .header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #cdd6f4;
+  }
+
+  .status-bar {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: #a6adc8;
+    margin-bottom: 8px;
+    padding: 4px 8px;
+    background: #181825;
+    border-radius: 6px;
+  }
+
+  .orient {
+    text-align: center;
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: #6c7086;
+    padding: 3px 0;
+    text-transform: uppercase;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+    margin-bottom: 8px;
+  }
+
+  .bedlet {
+    position: relative;
+    aspect-ratio: 1;
+    border-radius: 8px;
+    border: 2px solid #45475a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.5s ease;
+    min-height: 80px;
+    background: #1e1e2e;
+  }
+
+  .bedlet .label {
+    font-size: 10px;
+    color: #6c7086;
+    font-weight: 600;
+    position: absolute;
+    top: 4px;
+    left: 6px;
+  }
+
+  .bedlet .temp {
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .bedlet .target {
+    font-size: 10px;
+    color: #a6adc8;
+    margin-top: 2px;
+  }
+
+  .bedlet .unit {
+    font-size: 12px;
+    font-weight: 400;
+  }
+
+  /* Row labels */
+  .row-label {
+    font-size: 9px;
+    color: #585b70;
+    text-align: right;
+    padding-right: 4px;
+    grid-column: 1 / -1;
+    margin-top: 2px;
+  }
+
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    font-size: 11px;
+  }
+
+  .summary-item {
+    background: #181825;
+    border-radius: 6px;
+    padding: 6px 8px;
+    text-align: center;
+  }
+
+  .summary-item .value {
+    font-size: 18px;
+    font-weight: 700;
+    color: #f9e2af;
+  }
+
+  .summary-item .slab {
+    color: #6c7086;
+    font-size: 10px;
+  }
+
+  .error-bar {
+    text-align: center;
+    padding: 8px;
+    background: #2a1820;
+    border-radius: 6px;
+    color: #f38ba8;
+    font-size: 12px;
+    display: none;
+    margin-bottom: 8px;
+  }
+
+  @media (max-width: 300px) {
+    .bedlet { min-height: 60px; }
+    .bedlet .temp { font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <h1>Bedlet Grid</h1>
+  </div>
+
+  <div class="error-bar" id="errorBar">Connecting to printer...</div>
+
+  <div class="status-bar">
+    <span id="bedTarget">Target: --</span>
+    <span id="bedAvgLabel">Avg: --</span>
+    <span id="connStatus">Connecting...</span>
+  </div>
+
+  <div class="orient">REAR &mdash; TOOL DOCKS</div>
+  <div class="grid" id="grid"></div>
+  <div class="orient">FRONT &mdash; LCD</div>
+
+  <div class="summary">
+    <div class="summary-item">
+      <div class="value" id="minTemp">--</div>
+      <div class="slab">Min</div>
+    </div>
+    <div class="summary-item">
+      <div class="value" id="avgTemp">--</div>
+      <div class="slab">Average</div>
+    </div>
+    <div class="summary-item">
+      <div class="value" id="maxTemp">--</div>
+      <div class="slab">Max</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Prusa physical wiring map: grid[row][col] = sensor number (1-based)
+// Row 0 = front (Y 0-90), Row 3 = back (Y 270-360)
+const BEDLET_MAP = [
+  [7,  8,  9,  10],
+  [6,  5,  12, 11],
+  [3,  4,  13, 14],
+  [2,  1,  16, 15],
+];
+
+// Moonraker through the same address the page came from (KlipperXL-Plus:
+// Mainsail's nginx passes /printer/... on to Moonraker).  Port 7125 directly
+// is another origin, and Moonraker's cors_domains (MainsailOS: *.local,
+// *.lan) refuses it when the printer is opened by its IP address.
+const MOONRAKER = window.location.origin;
+
+// State: temps[1..16] = current temperature
+let temps = {};
+let bedTarget = 0;
+let bedAvgTemp = 0;
+
+// Color based on temperature
+function tempColor(t) {
+  if (t < 25)  return { text: '#89b4fa', bg: '#1e1e2e', border: '#45475a' };   // cold - blue
+  if (t < 40)  return { text: '#94e2d5', bg: '#1a2320', border: '#45475a' };   // lukewarm - teal
+  if (t < 60)  return { text: '#a6e3a1', bg: '#1a2518', border: '#a6e3a1' };   // warm - green
+  if (t < 80)  return { text: '#f9e2af', bg: '#2a2520', border: '#f9e2af' };   // heating - yellow
+  if (t < 100) return { text: '#fab387', bg: '#2a2018', border: '#fab387' };   // hot - orange
+  return              { text: '#f38ba8', bg: '#2a1820', border: '#f38ba8' };   // max - red
+}
+
+// Build grid cells
+function buildGrid() {
+  const grid = document.getElementById('grid');
+  // Draw BACK row first so the page matches how you look at the machine:
+  // rear (tool docks) at the top, front (LCD) at the bottom.
+  // BEDLET_MAP itself stays in firmware order (row 0 = front, Y 0-90) so it
+  // still lines up with xl_puppies.py's BEDLET_MAP (0-based there) - only the
+  // drawing is flipped, not the data.
+  for (let row = 3; row >= 0; row--) {
+    for (let col = 0; col < 4; col++) {
+      const num = BEDLET_MAP[row][col];
+      const pad = String(num).padStart(2, '0');
+      const cell = document.createElement('div');
+      cell.className = 'bedlet';
+      cell.id = `b${num}`;
+      cell.innerHTML =
+        `<span class="label">B${pad}</span>` +
+        `<span class="temp" id="t${num}">--<span class="unit">&deg;</span></span>` +
+        `<span class="target" id="tgt${num}"></span>`;
+      grid.appendChild(cell);
+    }
+  }
+}
+
+// Update display for one bedlet
+function showBedlet(num) {
+  const t = temps[num];
+  if (t === undefined) return;
+
+  const c = tempColor(t);
+  const cell = document.getElementById(`b${num}`);
+  const tempEl = document.getElementById(`t${num}`);
+  const tgtEl = document.getElementById(`tgt${num}`);
+  if (!cell) return;
+
+  cell.style.borderColor = c.border;
+  cell.style.background = c.bg;
+  tempEl.style.color = c.text;
+  tempEl.innerHTML = `${Math.round(t)}<span class="unit">&deg;</span>`;
+
+  if (bedTarget > 0) {
+    tgtEl.textContent = `\u2192 ${Math.round(bedTarget)}\u00b0`;
+  } else {
+    tgtEl.textContent = '';
+  }
+}
+
+// Update all cells and summary
+function refreshDisplay() {
+  for (let i = 1; i <= 16; i++) showBedlet(i);
+
+  // Calculate stats
+  const vals = Object.values(temps).filter(v => v !== undefined);
+  if (vals.length > 0) {
+    const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    document.getElementById('avgTemp').textContent = `${avg.toFixed(1)}\u00b0`;
+    document.getElementById('minTemp').textContent = `${min.toFixed(1)}\u00b0`;
+    document.getElementById('maxTemp').textContent = `${max.toFixed(1)}\u00b0`;
+    document.getElementById('bedAvgLabel').textContent = `Avg: ${avg.toFixed(1)}\u00b0`;
+  }
+
+  document.getElementById('bedTarget').textContent =
+    bedTarget > 0 ? `Target: ${Math.round(bedTarget)}\u00b0` : 'Target: off';
+}
+
+// Parse Moonraker status object
+function parseStatus(status) {
+  for (const [key, val] of Object.entries(status)) {
+    // Match _Bedlet_XX or Bedlet_XX sensors
+    const m = key.match(/[Bb]edlet_(\d+)/);
+    if (m && val.temperature !== undefined) {
+      temps[parseInt(m[1])] = val.temperature;
+    }
+
+    // Modular_Bed average sensor has the target
+    if (key.toLowerCase().includes('modular_bed')) {
+      if (val.temperature !== undefined) bedAvgTemp = val.temperature;
+      if (val.target !== undefined) bedTarget = val.target;
+    }
+  }
+  refreshDisplay();
+}
+
+// Poll Moonraker REST API (simple, reliable)
+async function poll() {
+  const objects = [];
+  for (let i = 1; i <= 16; i++) {
+    objects.push(`temperature_sensor _Bedlet_${String(i).padStart(2,'0')}`);
+  }
+  objects.push('temperature_sensor Modular_Bed');
+
+  const query = objects.map(o => encodeURIComponent(o)).join('&');
+  const url = `${MOONRAKER}/printer/objects/query?${query}`;
+
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.result && data.result.status) {
+      document.getElementById('errorBar').style.display = 'none';
+      document.getElementById('connStatus').textContent = 'Connected';
+      document.getElementById('connStatus').style.color = '#a6e3a1';
+      parseStatus(data.result.status);
+    }
+  } catch (e) {
+    document.getElementById('errorBar').textContent = 'Cannot reach printer...';
+    document.getElementById('errorBar').style.display = 'block';
+    document.getElementById('connStatus').textContent = 'Disconnected';
+    document.getElementById('connStatus').style.color = '#f38ba8';
+  }
+}
+
+// Initialize
+buildGrid();
+poll();
+setInterval(poll, 2000);
+</script>
+
+</body>
+</html>

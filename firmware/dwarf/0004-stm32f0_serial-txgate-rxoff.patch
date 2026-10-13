@@ -1,0 +1,367 @@
+diff --git a/src/stm32/stm32f0_serial.c b/src/stm32/stm32f0_serial.c
+index 2b3df192..4a2d2cbe 100644
+--- a/src/stm32/stm32f0_serial.c
++++ b/src/stm32/stm32f0_serial.c
+@@ -15,9 +15,17 @@
+ // Address filtering: set_serial_address command locks a Dwarf to its
+ // own address.  Frames with non-matching addresses are silently dropped
+ // until the next RTOR timeout.  my_address=0 accepts all (boot default).
++//
++// TX gating (KlipperXL task D, 2026-10-02, research/multitool/
++// RESULT-dwarf-txgate.md): the Dwarf drives the bus only inside a
++// window that opens after the end of a frame addressed to it, and the
++// receiver is off while it drives (Prusa-Firmware-Buddy
++// src/puppy/shared/hal/HAL_RS485.cpp:198, 252).  See the RS485 section.
+ 
+ #include "autoconf.h" // CONFIG_SERIAL_BAUD
+ #include "board/armcm_boot.h" // armcm_enable_irq
++#include "board/irq.h" // irq_save
++#include "board/misc.h" // timer_read_time
+ #include "board/serial_irq.h" // serial_rx_byte
+ #include "command.h" // DECL_CONSTANT_STR
+ #include "internal.h" // enable_pclock
+@@ -149,12 +157,19 @@
+   // RTOIE: interrupt on receiver timeout (configurable via RTOR register).
+   // Unlike IDLEIE (fixed 1-char = 43us threshold that SysTick gaps exceed),
+   // RTOR uses 500 bit-times (~2.17ms) — immune to SysTick jitter.
++  // IDLEIE is on as well, but it is only honoured for a frame whose
++  // length cannot be counted (see "TX gating" below).
++  #define RS485_GATED 1
+   #define CR1_FLAGS (USART_CR1_UE | USART_CR1_RE | USART_CR1_TE   \
+                      | USART_CR1_RXNEIE                            \
+                      | USART_CR1_RTOIE                             \
++                     | USART_CR1_IDLEIE                            \
+                      | (8 << USART_CR1_DEAT_Pos)                   \
+                      | (8 << USART_CR1_DEDT_Pos))
++  // The same with the receiver off: what CR1 holds while we drive the bus
++  #define CR1_FLAGS_TX (CR1_FLAGS & ~USART_CR1_RE)
+ #else
++  #define RS485_GATED 0
+   #define CR1_FLAGS (USART_CR1_UE | USART_CR1_RE | USART_CR1_TE   \
+                      | USART_CR1_RXNEIE)
+ #endif
+@@ -185,12 +200,154 @@
+  * frame boundaries mid-frame — consuming data bytes as "addresses".
+  * RTOR with 500 bit-times requires 2.17ms of silence, which only
+  * occurs between actual frames (never mid-frame from SysTick).
++ *
++ * TX gating (task D).  Klipper's serial driver otherwise transmits the
++ * moment console_sendf() has queued a message (src/generic/
++ * serial_irq.c:94-114), which on a shared half-duplex bus collides
++ * with whoever is driving it, and the XLBuddy only listens for a
++ * reply right after it has addressed a Dwarf (research/multitool/
++ * bridge-era-source/modbus_stm32f4.c, the capture after the write:
++ * first byte within 3ms, then until 500us of silence, at most 192
++ * bytes / 15ms).  Prusa's own Dwarf firmware transmits only in reply
++ * to a frame carrying its address (ModbusTask.cpp:80-81) and turns the
++ * receiver off while it drives (HAL_RS485.cpp:198, back on at
++ * transmit-complete, :252).  So:
++ *
++ *   closed --(end of a frame addressed to us)--> opening
++ *   opening --(TX_TURNAROUND_US)--> open: if output is queued, drive;
++ *   open, nothing to send for TX_OPEN_MAX_US --> closed
++ *   open, driving: receiver off; stop at TX_WINDOW_MAX_BYTES /
++ *     TX_WINDOW_MAX_US; when the buffer runs dry wait for TC, receiver
++ *     on, then TX_GRACE_US for more output, else closed.
++ *
++ * Output queued while closed stays in the transmit buffer (96 bytes,
++ * serial_irq.c:20; what does not fit is dropped there, as in stock
++ * Klipper) and goes out in the next window - the host polls an idle
++ * Dwarf for exactly that.  Where a window ends mid-message the rest
++ * follows in the next window; the host's serialqueue reassembles.
++ *
++ * The end of the XLBuddy's frame is found by counting: the frame is
++ * [address][optional 0x7e][one Klipper block] and a block's first byte
++ * is its length (5..64, src/command.h:46-47), so the last byte is
++ * known without any timing.  Only a frame with no block - the host's
++ * idle poll, a bare 0x7e - ends on the IDLE flag (one character of
++ * silence); a gap in the XLBuddy's output right after a sync byte
++ * would open the window early, which costs that one (rare, resend)
++ * frame and nothing else.
++ *
++ * In accept-all mode (my_address == 0, before set_serial_address) only
++ * address bytes with bit 7 set are taken: that is the bridge's
++ * address space (0x81-0x85, comment above), and it keeps an unlocked
++ * Dwarf from parsing a MODBUS or bootloader frame for another device
++ * as Klipper data and from opening a window after it.  This is a task
++ * D addition, not in the recovered diff.
+  ****************************************************************/
+ 
+-#if CONFIG_MACH_STM32G0 && CONFIG_STM32_SERIAL_USART1
++#if RS485_GATED
+ static volatile uint8_t expect_address; // 1 when next RX byte is address
+ static volatile uint8_t my_address;     // 0 = accept all, else match required
+ static volatile uint8_t muted;          // 1 = wrong address, drop until RTOR
++
++// Frame-end tracking for the frame being received
++static uint8_t in_frame;     // address matched, data bytes may follow
++static uint8_t frame_any;    // at least one data byte seen
++static uint8_t frame_len;    // block length byte seen (0: none yet)
++static uint8_t frame_got;    // data bytes of that block seen so far
++
++// TX window
++enum { WIN_CLOSED, WIN_OPENING, WIN_OPEN };
++static volatile uint8_t win_state;
++static volatile uint8_t tx_active;   // driver enabled, receiver off
++static volatile uint8_t tx_pending;  // output queued while not allowed
++static volatile uint8_t win_cap;     // window cap reached, stop driving
++static uint32_t win_open_time;
++static uint16_t win_bytes;
++static uint_fast8_t win_timer_event(struct timer *t);
++static struct timer win_timer = { .func = win_timer_event };
++
++#define TX_TURNAROUND_US      100   // XLBuddy: TC -> rs485_rx_enable -> flush, ~15us
++#define TX_OPEN_MAX_US       2500   // XLBuddy waits 3000us for a first byte
++#define TX_GRACE_US           300   // XLBuddy ends the capture after 500us of silence
++#define TX_WINDOW_MAX_US    10000   // XLBuddy caps a capture at 15000us
++#define TX_WINDOW_MAX_BYTES   192   // XLBuddy rx_buf[192]
++
++static void
++win_timer_set(uint32_t waketime)
++{
++    // Never schedule into the past: sched_add_timer() shuts the MCU
++    // down on that ("Timer too close", sched.c:93-94)
++    uint32_t soonest = timer_read_time() + timer_from_us(20);
++    if (timer_is_before(waketime, soonest))
++        waketime = soonest;
++    sched_del_timer(&win_timer);
++    win_timer.waketime = waketime;
++    sched_add_timer(&win_timer);
++}
++
++static void
++win_close(void)
++{
++    sched_del_timer(&win_timer);
++    win_state = WIN_CLOSED;
++    win_cap = 0;
++    // The exchange is over: whatever comes next on the bus starts
++    // with an address byte, whether or not RTOR got to say so (the
++    // receiver was off while we drove).
++    expect_address = 1;
++    muted = 0;
++    in_frame = 0;
++}
++
++// Start driving the bus: receiver off (HAL_RS485.cpp:198), TXE irq on
++static void
++tx_start(void)
++{
++    tx_active = 1;
++    tx_pending = 0;
++    USARTx->CR1 = CR1_FLAGS_TX | USART_CR1_TXEIE;
++}
++
++// End of an addressed frame received: open the window after the
++// XLBuddy has had time to release the bus
++static void
++frame_end(void)
++{
++    frame_len = frame_got = frame_any = 0;
++    if (win_state != WIN_CLOSED)
++        return;
++    win_state = WIN_OPENING;
++    win_timer_set(timer_read_time() + timer_from_us(TX_TURNAROUND_US));
++}
++
++static uint_fast8_t
++win_timer_event(struct timer *t)
++{
++    if (win_state == WIN_OPENING) {
++        win_state = WIN_OPEN;
++        win_open_time = timer_read_time();
++        win_bytes = 0;
++        if (tx_pending) {
++            tx_start();
++            t->waketime = win_open_time + timer_from_us(TX_WINDOW_MAX_US);
++        } else {
++            t->waketime = win_open_time + timer_from_us(TX_OPEN_MAX_US);
++        }
++        return SF_RESCHEDULE;
++    }
++    if (win_state == WIN_OPEN && tx_active) {
++        // Time cap while driving: the TXE handler stops at the next byte
++        // and the TC handler closes the window
++        win_cap = 1;
++        return SF_DONE;
++    }
++    // Start deadline or grace period passed with nothing to send
++    win_state = WIN_CLOSED;
++    win_cap = 0;
++    expect_address = 1;
++    muted = 0;
++    in_frame = 0;
++    return SF_DONE;
++}
+ #endif
+ 
+ void
+@@ -198,28 +355,54 @@ USARTx_IRQHandler(void)
+ {
+     uint32_t sr = USARTx->ISR;
+ 
+-#if CONFIG_MACH_STM32G0 && CONFIG_STM32_SERIAL_USART1
++#if RS485_GATED
+     // Receiver timeout — inter-frame silence detected.
+     // Reset mute state and prepare for address byte.
+     if (sr & USART_ISR_RTOF) {
+         USARTx->ICR = USART_ICR_RTOCF;
+         expect_address = 1;
+         muted = 0;
++        in_frame = 0;
++        frame_len = frame_got = frame_any = 0;
+     }
+ 
+     if (sr & USART_ISR_RXNE) {
+         uint8_t byte = USARTx->RDR;
+         if (muted)
+-            return;  // Wrong address — drop all bytes until next RTOR
++            goto rx_done;  // Wrong address — drop all bytes until next RTOR
+         if (expect_address) {
+             expect_address = 0;
+-            if (my_address && byte != my_address) {
++            if (my_address ? byte != my_address : !(byte & 0x80)) {
+                 muted = 1;  // Not our frame — mute until next RTOR
+-                return;
++                in_frame = 0;
++                goto rx_done;
+             }
+-            return;  // Our address (or accept-all) — consume address byte
++            // Our address (or accept-all) — consume address byte
++            in_frame = 1;
++            frame_len = frame_got = frame_any = 0;
++            goto rx_done;
+         }
+         serial_rx_byte(byte);
++        if (in_frame) {
++            frame_any = 1;
++            if (frame_len) {
++                if (++frame_got >= frame_len)
++                    frame_end();
++            } else if (byte != MESSAGE_SYNC && byte >= MESSAGE_MIN
++                       && byte <= MESSAGE_MAX) {
++                frame_len = byte;
++                frame_got = 1;
++            }
++        }
++    }
++rx_done:
++
++    if (sr & USART_ISR_IDLE) {
++        USARTx->ICR = USART_ICR_IDLECF;
++        // One character of silence.  Honoured only for a frame that
++        // carried no block (the poll's bare 0x7e), see above.
++        if (in_frame && frame_any && !frame_len)
++            frame_end();
+     }
+ #else
+     if (sr & USART_ISR_RXNE)
+@@ -227,16 +410,52 @@ USARTx_IRQHandler(void)
+ #endif
+ 
+     if (sr & USART_ISR_TXE && USARTx->CR1 & USART_CR1_TXEIE) {
++#if RS485_GATED
++        if (win_cap || win_bytes >= TX_WINDOW_MAX_BYTES) {
++            // Window cap: the rest goes out in the next window
++            tx_pending = 1;
++            USARTx->CR1 = CR1_FLAGS_TX | USART_CR1_TCIE;
++        } else {
++            uint8_t data;
++            if (serial_get_tx_byte(&data)) {
++                // Buffer empty: keep the receiver off until the last
++                // byte has left the shift register (TC)
++                USARTx->CR1 = CR1_FLAGS_TX | USART_CR1_TCIE;
++            } else {
++                USARTx->TDR = data;
++                win_bytes++;
++            }
++        }
++#else
+         uint8_t data;
+         int ret = serial_get_tx_byte(&data);
+         if (ret)
+             USARTx->CR1 = CR1_FLAGS;
+         else
+             USARTx->TDR = data;
++#endif
+     }
++
++#if RS485_GATED
++    if (sr & USART_ISR_TC && USARTx->CR1 & USART_CR1_TCIE) {
++        USARTx->ICR = USART_ICR_TCCF;
++        if (USARTx->CR1 & USART_CR1_TXEIE)
++            // More output was queued meanwhile and TX resumed
++            goto tx_done;
++        // Last byte is on the wire: receiver back on (HAL_RS485.cpp:252)
++        tx_active = 0;
++        USARTx->CR1 = CR1_FLAGS;
++        if (win_cap || win_bytes >= TX_WINDOW_MAX_BYTES)
++            win_close();
++        else
++            // Give the main loop a moment to add to this reply
++            win_timer_set(timer_read_time() + timer_from_us(TX_GRACE_US));
++    }
++tx_done:;
++#endif
+ }
+ 
+-#if CONFIG_MACH_STM32G0 && CONFIG_STM32_SERIAL_USART1
++#if RS485_GATED
+ void
+ command_set_serial_address(uint32_t *args)
+ {
+@@ -248,7 +467,24 @@ DECL_COMMAND(command_set_serial_address, "set_serial_address address=%u");
+ void
+ serial_enable_tx_irq(void)
+ {
++#if RS485_GATED
++    irqstatus_t flag = irq_save();
++    if (win_state == WIN_OPEN && !win_cap
++        && win_bytes < TX_WINDOW_MAX_BYTES) {
++        // Inside the window: drive now (or keep driving - this also
++        // resumes a transmission that was waiting for TC)
++        if (!tx_active) {
++            // Grace period was running: it becomes the time cap
++            win_timer_set(win_open_time + timer_from_us(TX_WINDOW_MAX_US));
++        }
++        tx_start();
++    } else {
++        tx_pending = 1;
++    }
++    irq_restore(flag);
++#else
+     USARTx->CR1 = CR1_FLAGS | USART_CR1_TXEIE;
++#endif
+ }
+ 
+ void
+@@ -267,7 +503,7 @@ serial_init(void)
+     gpio_peripheral(GPIO_Rx, USARTx_FUNCTION, 1);
+     gpio_peripheral(GPIO_Tx, USARTx_FUNCTION, 0);
+ 
+-#if CONFIG_MACH_STM32G0 && CONFIG_STM32_SERIAL_USART1
++#if RS485_GATED
+     // RS485 Driver Enable on PA12 (USART1_DE, AF1)
+     // Hardware DE mode: USART automatically asserts DE HIGH during TX
+     // DEAT/DEDT timing is in CR1_FLAGS (8 bit-clocks each)
+@@ -282,14 +518,18 @@ serial_init(void)
+     USARTx->RTOR = 500;
+     USARTx->CR2 |= USART_CR2_RTOEN;         // Enable receiver timeout
+ 
+-    USARTx->CR1 |= USART_CR1_UE;            // Re-enable USART
+-
+     // First byte after boot is always an address byte.
+     // RTOR will maintain this between subsequent frames.
+     expect_address = 1;
+     // Boot in accept-all mode — host sets address after identify.
+     my_address = 0;
+     muted = 0;
++    in_frame = 0;
++    // TX window closed until the first frame addressed to us
++    win_state = WIN_CLOSED;
++    tx_active = tx_pending = win_cap = 0;
++
++    USARTx->CR1 |= USART_CR1_UE;            // Re-enable USART
+ #endif
+ }
+ DECL_INIT(serial_init);

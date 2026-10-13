@@ -1,0 +1,81 @@
+diff --git a/src/stm32/Kconfig b/src/stm32/Kconfig
+index cdfccbb2..a0a1ae2f 100644
+--- a/src/stm32/Kconfig
++++ b/src/stm32/Kconfig
+@@ -208,6 +208,7 @@ config CLOCK_FREQ
+     default 168000000 if MACH_STM32F4x5
+     default 180000000 if MACH_STM32F446
+     default 216000000 if MACH_STM32F765
++    default 56000000 if STM32G0_PRUSA_PUPPY_CLOCK
+     default 64000000 if MACH_STM32G0
+     default 170000000 if MACH_STM32G431
+     default 170000000 if MACH_STM32G474
+@@ -375,6 +376,16 @@ config CLOCK_REF_FREQ
+     default 1 if STM32_CLOCK_REF_INTERNAL
+     default 8000000
+ 
++config STM32G0_PRUSA_PUPPY_CLOCK
++    bool "Prusa puppy clock tree (12MHz HSE /3 x70 /5 = 56MHz)" if LOW_LEVEL_OPTIONS
++    depends on MACH_STM32G07x && STM32_CLOCK_REF_12M
++    default y
++    help
++        Run the STM32G07x at the clock Prusa-Firmware-Buddy uses on its
++        puppy boards (XL Dwarf, modular bed): HSE 12MHz, PLLM /3,
++        PLLN x70, PLLR /5, SYSCLK 56MHz (src/device/stm32g0/core_init.cpp).
++        Without this a 12MHz STM32G07x runs the generic 64MHz tree.
++
+ config STM32F0_TRIM
+     int "Internal clock trim override" if LOW_LEVEL_OPTIONS && MACH_STM32F0 && STM32_CLOCK_REF_INTERNAL && !USBSERIAL
+     default 16
+diff --git a/src/stm32/stm32g0.c b/src/stm32/stm32g0.c
+index d02d5728..713befe0 100644
+--- a/src/stm32/stm32g0.c
++++ b/src/stm32/stm32g0.c
+@@ -18,9 +18,17 @@
+  * Clock setup
+  ****************************************************************/
+ 
+-#define FREQ_PERIPH 64000000
++// Every peripheral runs at the system clock: clock_setup() leaves the
++// AHB and APB prescalers at /1 (only SW is written to RCC->CFGR).
++#define FREQ_PERIPH CONFIG_CLOCK_FREQ
+ #define FREQ_USB 48000000
+ 
++#if CONFIG_STM32G0_PRUSA_PUPPY_CLOCK
++  #if CONFIG_CLOCK_REF_FREQ != 12000000 || CONFIG_CLOCK_FREQ != 56000000
++    #error "STM32G0_PRUSA_PUPPY_CLOCK is 12MHz HSE -> 56MHz only"
++  #endif
++#endif
++
+ // Map a peripheral address to its enable bits
+ struct cline
+ lookup_clock_line(uint32_t periph_base)
+@@ -108,6 +116,16 @@ static void
+ clock_setup(void)
+ {
+     uint32_t pll_base = 4000000, pll_freq = 192000000, pllcfgr;
++#if CONFIG_STM32G0_PRUSA_PUPPY_CLOCK
++    // The PLL tree Prusa-Firmware-Buddy sets on its STM32G070 puppy
++    // boards, src/device/stm32g0/core_init.cpp:16-19 (commit 1ce23f3):
++    // HSE 12MHz, PLLM /3, PLLN x70, PLLP /2, PLLR /5 -> VCO 280MHz,
++    // SYSCLK 56MHz.  AHB and APB /1 (core_init.cpp:28-29) and two flash
++    // wait states (core_init.cpp:31) are what this file sets anyway.
++    // With pll_base 4MHz the generic arithmetic below yields exactly
++    // PLLM /3 and PLLN x70, and PLLR 280/56 = /5.
++    pll_freq = 280000000;
++#endif
+     if (!CONFIG_STM32_CLOCK_REF_INTERNAL) {
+         // Configure PLL from external crystal (HSE)
+         uint32_t div = CONFIG_CLOCK_REF_FREQ / pll_base;
+@@ -120,6 +138,11 @@ clock_setup(void)
+     }
+     pllcfgr |= (pll_freq/pll_base) << RCC_PLLCFGR_PLLN_Pos;
+     pllcfgr |= (pll_freq/CONFIG_CLOCK_FREQ - 1) << RCC_PLLCFGR_PLLR_Pos;
++#if CONFIG_STM32G0_PRUSA_PUPPY_CLOCK
++    // PLLP /2 as core_init.cpp:18; the P output stays disabled (PLLPEN
++    // clear), as HAL_RCC_OscConfig leaves it too.
++    pllcfgr |= (2 - 1) << RCC_PLLCFGR_PLLP_Pos;
++#endif
+ #ifdef RCC_PLLCFGR_PLLQ
+     pllcfgr |= ((pll_freq/FREQ_USB - 1) << RCC_PLLCFGR_PLLQ_Pos)
+             | RCC_PLLCFGR_PLLQEN;

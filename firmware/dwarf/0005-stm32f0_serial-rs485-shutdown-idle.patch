@@ -1,0 +1,31 @@
+--- a/src/stm32/stm32f0_serial.c
++++ b/src/stm32/stm32f0_serial.c
+@@ -298,6 +298,28 @@
+     in_frame = 0;
+ }
+ 
++// KlipperXL+ (2026-10-03): Klipper's shutdown clears every timer
++// (sched_timer_reset(), src/sched.c:183-187, called at :304) - win_timer
++// too.  A window left OPENING or OPEN then never closes, frame_end()
++// ignores every later frame (win_state != WIN_CLOSED) and the Dwarf is
++// alive but mute: it cannot even report why it shut down (printer
++// 2026-10-03: "Lost communication with MCU 'dwarf_t0'", no shutdown
++// reason).  Shutdown handlers run after the timers are cleared, so put
++// the bus side back to idle here: stop driving, receiver on, window
++// closed, and let the queued output (the shutdown message) go out in the
++// next window.  A message cut short mid-transmit is resent by the host.
++void
++win_shutdown(void)
++{
++    irqstatus_t flag = irq_save();
++    tx_active = 0;
++    USARTx->CR1 = CR1_FLAGS;
++    win_close();
++    tx_pending = 1;
++    irq_restore(flag);
++}
++DECL_SHUTDOWN(win_shutdown);
++
+ // Start driving the bus: receiver off (HAL_RS485.cpp:198), TXE irq on
+ static void
+ tx_start(void)

@@ -1,0 +1,21 @@
+diff --git a/src/stm32/stm32f0_serial.c b/src/stm32/stm32f0_serial.c
+index d4d907c..f6eafcc 100644
+--- a/src/stm32/stm32f0_serial.c
++++ b/src/stm32/stm32f0_serial.c
+@@ -595,6 +595,16 @@ serial_init(void)
+     expect_address = 1;
+     // Boot in accept-all mode — host sets address after identify.
+     my_address = 0;
++#if CONFIG_STM32G0_PRUSA_APP_ARGS
++    // ...unless the Prusa bootloader assigned this Dwarf its address
++    // (0x0B-0x0F = Dwarf 1-5): then lock to its wire address 0x81-0x85
++    // (0x80 | dwarf_index, the addressing above) from the first byte.
++    // No accept-all window, so the host need not give this Dwarf the bus
++    // alone while it is brought up.  Any other value (no handoff) keeps
++    // the accept-all boot and the host's set_serial_address.
++    if (boot_address >= 0x0B && boot_address <= 0x0F)
++        my_address = 0x80 | (boot_address - 0x0A);
++#endif
+     muted = 0;
+     in_frame = 0;
+     // TX window closed until the first frame addressed to us

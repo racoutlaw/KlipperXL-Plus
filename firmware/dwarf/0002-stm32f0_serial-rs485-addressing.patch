@@ -1,0 +1,161 @@
+diff --git a/src/stm32/stm32f0_serial.c b/src/stm32/stm32f0_serial.c
+index 964601b6..2b3df192 100644
+--- a/src/stm32/stm32f0_serial.c
++++ b/src/stm32/stm32f0_serial.c
+@@ -3,6 +3,18 @@
+ // Copyright (C) 2019  Kevin O'Connor <kevin@koconnor.net>
+ //
+ // This file may be distributed under the terms of the GNU GPLv3 license.
++//
++// RS485 multiprocessor addressing for Prusa XL Dwarf toolheads:
++// Copyright (C) 2026 Richard Crook (KlipperXL project)
++// Each Dwarf gets a unique bus address from the Prusa bootloader.
++// USART RTOR (receiver timeout) detects frame boundaries — immune to
++// SysTick-induced byte gaps that corrupt IDLE-based detection.
++// Wire address = 0x80 | dwarf_index (0x81-0x85) to avoid collision
++// with Klipper protocol length bytes (always < 0x80).
++//
++// Address filtering: set_serial_address command locks a Dwarf to its
++// own address.  Frames with non-matching addresses are silently dropped
++// until the next RTOR timeout.  my_address=0 accepts all (boot default).
+ 
+ #include "autoconf.h" // CONFIG_SERIAL_BAUD
+ #include "board/armcm_boot.h" // armcm_enable_irq
+@@ -132,15 +144,88 @@
+   #define USART_ISR_TXE USART_ISR_TXE_TXFNF
+ #endif
+ 
+-#define CR1_FLAGS (USART_CR1_UE | USART_CR1_RE | USART_CR1_TE   \
+-                   | USART_CR1_RXNEIE)
++#if CONFIG_MACH_STM32G0 && CONFIG_STM32_SERIAL_USART1
++  // RS485 DE mode + RTOR-based frame boundary detection:
++  // RTOIE: interrupt on receiver timeout (configurable via RTOR register).
++  // Unlike IDLEIE (fixed 1-char = 43us threshold that SysTick gaps exceed),
++  // RTOR uses 500 bit-times (~2.17ms) — immune to SysTick jitter.
++  #define CR1_FLAGS (USART_CR1_UE | USART_CR1_RE | USART_CR1_TE   \
++                     | USART_CR1_RXNEIE                            \
++                     | USART_CR1_RTOIE                             \
++                     | (8 << USART_CR1_DEAT_Pos)                   \
++                     | (8 << USART_CR1_DEDT_Pos))
++#else
++  #define CR1_FLAGS (USART_CR1_UE | USART_CR1_RE | USART_CR1_TE   \
++                     | USART_CR1_RXNEIE)
++#endif
++
++/****************************************************************
++ * RS485 Frame Boundary Detection + Address Filtering (STM32G0)
++ *
++ * Wire protocol: [silence >= 2ms] [0x80|dwarf_index] [klipper_frame...]
++ * The RTOR (Receiver Timeout Register) fires after 500 bit-times
++ * (~2.17ms) of silence, marking the boundary between frames.
++ * First byte after timeout is an address byte.
++ *
++ * Address filtering:
++ *   my_address == 0  → accept all frames (boot default)
++ *   my_address != 0  → only accept frames matching my_address
++ *   Non-matching frames set 'muted' flag — all bytes until next
++ *   RTOR timeout are silently dropped (not passed to Klipper).
++ *
++ * The host sets my_address via the 'set_serial_address' command
++ * after MCU identification completes.  This allows sequential
++ * activation: each Dwarf starts in accept-all mode, gets identified
++ * on an exclusive bus, then locks to its address before the next
++ * Dwarf is released.
++ *
++ * Why not IDLE detection?  The XLBuddy's SysTick handler (100-200us)
++ * causes byte gaps > 43us during polled TX.  IDLE fires on any gap
++ * >= 1 character time (43us at 230400), so SysTick gaps trigger false
++ * frame boundaries mid-frame — consuming data bytes as "addresses".
++ * RTOR with 500 bit-times requires 2.17ms of silence, which only
++ * occurs between actual frames (never mid-frame from SysTick).
++ ****************************************************************/
++
++#if CONFIG_MACH_STM32G0 && CONFIG_STM32_SERIAL_USART1
++static volatile uint8_t expect_address; // 1 when next RX byte is address
++static volatile uint8_t my_address;     // 0 = accept all, else match required
++static volatile uint8_t muted;          // 1 = wrong address, drop until RTOR
++#endif
+ 
+ void
+ USARTx_IRQHandler(void)
+ {
+     uint32_t sr = USARTx->ISR;
++
++#if CONFIG_MACH_STM32G0 && CONFIG_STM32_SERIAL_USART1
++    // Receiver timeout — inter-frame silence detected.
++    // Reset mute state and prepare for address byte.
++    if (sr & USART_ISR_RTOF) {
++        USARTx->ICR = USART_ICR_RTOCF;
++        expect_address = 1;
++        muted = 0;
++    }
++
++    if (sr & USART_ISR_RXNE) {
++        uint8_t byte = USARTx->RDR;
++        if (muted)
++            return;  // Wrong address — drop all bytes until next RTOR
++        if (expect_address) {
++            expect_address = 0;
++            if (my_address && byte != my_address) {
++                muted = 1;  // Not our frame — mute until next RTOR
++                return;
++            }
++            return;  // Our address (or accept-all) — consume address byte
++        }
++        serial_rx_byte(byte);
++    }
++#else
+     if (sr & USART_ISR_RXNE)
+         serial_rx_byte(USARTx->RDR);
++#endif
++
+     if (sr & USART_ISR_TXE && USARTx->CR1 & USART_CR1_TXEIE) {
+         uint8_t data;
+         int ret = serial_get_tx_byte(&data);
+@@ -151,6 +236,15 @@ USARTx_IRQHandler(void)
+     }
+ }
+ 
++#if CONFIG_MACH_STM32G0 && CONFIG_STM32_SERIAL_USART1
++void
++command_set_serial_address(uint32_t *args)
++{
++    my_address = args[0];
++}
++DECL_COMMAND(command_set_serial_address, "set_serial_address address=%u");
++#endif
++
+ void
+ serial_enable_tx_irq(void)
+ {
+@@ -172,5 +266,30 @@ serial_init(void)
+ 
+     gpio_peripheral(GPIO_Rx, USARTx_FUNCTION, 1);
+     gpio_peripheral(GPIO_Tx, USARTx_FUNCTION, 0);
++
++#if CONFIG_MACH_STM32G0 && CONFIG_STM32_SERIAL_USART1
++    // RS485 Driver Enable on PA12 (USART1_DE, AF1)
++    // Hardware DE mode: USART automatically asserts DE HIGH during TX
++    // DEAT/DEDT timing is in CR1_FLAGS (8 bit-clocks each)
++    gpio_peripheral(GPIO('A', 12), GPIO_FUNCTION(1), 0);
++    USARTx->CR1 &= ~USART_CR1_UE;          // Disable USART to modify CR2/CR3
++    USARTx->CR3 |= USART_CR3_DEM;           // Enable Driver Enable Mode
++
++    // Configure Receiver Timeout for frame boundary detection.
++    // RTOR = 500 bit-times = ~2.17ms at 230400 baud.
++    // This is 10x longer than worst-case SysTick gaps (~200us)
++    // but 2-25x shorter than inter-frame gaps (5-50ms).
++    USARTx->RTOR = 500;
++    USARTx->CR2 |= USART_CR2_RTOEN;         // Enable receiver timeout
++
++    USARTx->CR1 |= USART_CR1_UE;            // Re-enable USART
++
++    // First byte after boot is always an address byte.
++    // RTOR will maintain this between subsequent frames.
++    expect_address = 1;
++    // Boot in accept-all mode — host sets address after identify.
++    my_address = 0;
++    muted = 0;
++#endif
+ }
+ DECL_INIT(serial_init);
