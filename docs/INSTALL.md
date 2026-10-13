@@ -266,6 +266,8 @@ See [SLICER_SETUP.md](SLICER_SETUP.md).
 **Update** there - press it: Mainsail pulls the new version and restarts
 Klipper. Most updates are done at that point.
 
+![Mainsail Update Manager with a KlipperXL-Plus update](images/mainsail-update-manager.png)
+
 An update that also changes configs or board firmware has to be finished by
 the installer page - Mainsail then shows a warning that says so. **Start the
 installer page from Mainsail:** the power menu (top right) → **Service
