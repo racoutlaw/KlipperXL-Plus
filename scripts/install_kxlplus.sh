@@ -452,7 +452,12 @@ for s in /etc/nginx/sites-available/mainsail /etc/nginx/sites-available/fluidd; 
     if [ -f "$s" ]; then SITE="$s"; break; fi
 done
 if [ -n "$SITE" ] && [ -f "$BEDLET" ]; then
-    if grep -q "location = /bedlet_grid.html" "$SITE"; then
+    # v2 (owner 10/14): "Cache-Control: no-cache" - a browser kept the
+    # v1.0.0 page after an update (it looked for the dropped Modular_Bed
+    # sensor: "Target: off") - and any spelling of the address (the browser
+    # offered bedlet_GRID.HTML from its history) is sent to the page.  A
+    # v1.0.0 block is replaced.
+    if grep -q "kxlplus-bedlet-v2" "$SITE"; then
         echo "  nginx: /bedlet_grid.html already set up ($SITE)"
     else
         sudo cp "$SITE" "$SITE.kxlplus-bak"
@@ -460,15 +465,25 @@ if [ -n "$SITE" ] && [ -f "$BEDLET" ]; then
 import re, sys
 site, page = sys.argv[1], sys.argv[2]
 text = open(site).read()
+# the v1.0.0 block (exact match only, no cache header) goes
+text = re.sub(r'[ \t]*# KlipperXL-Plus \(installer \[5c\]\)[^\n]*\n'
+              r'(?:[ \t]*#[^\n]*\n)*'
+              r'[ \t]*location = /bedlet_grid\.html \{[^}]*\}\n\n?', '', text)
 m = re.search(r'^([ \t]*)location / \{', text, re.M)
 if m is None:
     sys.exit("no 'location / {' in " + site)
 ind = m.group(1)
-block = (ind + "# KlipperXL-Plus (installer [5c]): the bedlet grid page, from the\n"
-         + ind + "# config folder - a Mainsail/Fluidd update cannot delete it\n"
+block = (ind + "# KlipperXL-Plus (installer [5c], kxlplus-bedlet-v2): the bedlet\n"
+         + ind + "# grid page from the config folder (a Mainsail/Fluidd update cannot\n"
+         + ind + "# delete it); browsers re-check it, so an update shows at once;\n"
+         + ind + "# any other spelling of the address is sent to it\n"
          + ind + "location = /bedlet_grid.html {\n"
          + ind + "    alias %s;\n" % (page,)
          + ind + "    default_type text/html;\n"
+         + ind + "    add_header Cache-Control \"no-cache\";\n"
+         + ind + "}\n"
+         + ind + "location ~* ^/bedlet_grid\\.html$ {\n"
+         + ind + "    return 301 /bedlet_grid.html;\n"
          + ind + "}\n\n")
 open(site, "w").write(text[:m.start()] + block + text[m.start():])
 PYEOF
@@ -486,18 +501,41 @@ PYEOF
         fi
     fi
     # the camera entry, in Moonraker's database - yours to change or delete
-    # (POST /server/webcams/item adds one - moonraker components/webcam.py)
-    if curl -s localhost:7125/server/webcams/list | grep -q "bedlet_grid.html"; then
-        echo "  camera: a bedlet grid camera is already there"
-    elif curl -s -o /dev/null -w "%{http_code}" -X POST \
-            -H "Content-Type: application/json" \
-            -d '{"name": "Modular Bed", "service": "iframe", "stream_url": "/bedlet_grid.html", "aspect_ratio": "1:1", "location": "printer", "enabled": true}' \
-            localhost:7125/server/webcams/item | grep -q "^200$"; then
-        echo "  camera: 'Modular Bed' added (Mainsail: Webcams; Fluidd: Cameras)"
-    else
-        echo "  WARNING: Moonraker did not take the camera entry - add it by hand:"
-        echo "  name Modular Bed, service iframe, URL /bedlet_grid.html, 1:1"
-    fi
+    # (POST /server/webcams/item adds one, or with its uid updates it -
+    # moonraker components/webcam.py).  The address carries ?v=2: a browser
+    # kept v1.0.0's page in its iframe after an update (owner 10/14) and a
+    # new address is the one thing that makes it fetch again; a v1.0.0
+    # camera (plain /bedlet_grid.html) is moved to it.
+    CAM=$("$PY" - <<'PYEOF' 2>/dev/null
+import json, urllib.request
+URL = "/bedlet_grid.html?v=2"
+def call(method, path, body=None):
+    req = urllib.request.Request("http://localhost:7125" + path, method=method,
+                                 data=json.dumps(body).encode() if body else None,
+                                 headers={"Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(req, timeout=10))["result"]
+cams = [c for c in call("GET", "/server/webcams/list")["webcams"]
+        if c.get("stream_url", "").startswith("/bedlet_grid.html")]
+if not cams:
+    call("POST", "/server/webcams/item", {
+        "name": "Modular Bed", "service": "iframe", "stream_url": URL,
+        "aspect_ratio": "1:1", "location": "printer", "enabled": True})
+    print("added")
+elif cams[0]["stream_url"] == "/bedlet_grid.html":
+    cam = dict(cams[0]); cam.pop("source", None); cam["stream_url"] = URL
+    call("POST", "/server/webcams/item", cam)
+    print("moved")
+else:
+    print("there")
+PYEOF
+)
+    case "$CAM" in
+        added) echo "  camera: 'Modular Bed' added (Mainsail: Webcams; Fluidd: Cameras)" ;;
+        moved) echo "  camera: the bedlet grid camera now loads the new page (?v=2)" ;;
+        there) echo "  camera: a bedlet grid camera is already there" ;;
+        *)     echo "  WARNING: Moonraker did not take the camera entry - add it by hand:"
+               echo "  name Modular Bed, service iframe, URL /bedlet_grid.html?v=2, 1:1" ;;
+    esac
 else
     echo "  NOTE: no Mainsail/Fluidd nginx site found - bedlet grid page not set up"
 fi
