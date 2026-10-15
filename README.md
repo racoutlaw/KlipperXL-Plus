@@ -139,7 +139,7 @@ picks and parks tools.
   all** and **Off** too. Each bedlet shows its own target. Console:
   `SET_BED_ZONES ZONES=1,2,5 S=60`
 - the bedlet grid page also opens on its own in a browser:
-  `http://<your Pi>/bedlet_grid.html`
+  `http://<your Pi>/bedlet_grid.html?v=2`
 
 ### More
 - the **bedlet grid is set up as a camera** ("Modular Bed") by the installer
