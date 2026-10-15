@@ -23,7 +23,9 @@ restarts after the change. Start-up takes a few seconds longer.
 
 **Bedlet grid page** always loads fresh after an update (browsers re-check
 it, and the camera's address is now `/bedlet_grid.html?v=2`); any spelling
-of its address works.
+of its address works. Its camera is taller now (3:4): in Mainsail's camera
+panel on a computer screen the whole page shows without scrolling. A camera
+still at v1.0.0's 1:1 is changed; any other shape you chose is kept.
 
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section and the new grid page): power menu

@@ -505,7 +505,9 @@ PYEOF
     # moonraker components/webcam.py).  The address carries ?v=2: a browser
     # kept v1.0.0's page in its iframe after an update (owner 10/14) and a
     # new address is the one thing that makes it fetch again; a v1.0.0
-    # camera (plain /bedlet_grid.html) is moved to it.
+    # camera (plain /bedlet_grid.html) is moved to it.  3:4: the whole page
+    # fits in Mainsail's camera panel without a scroll (owner 10/15; 1:1 needed
+    # one) - a v1.0.0 camera still at 1:1 gets it too, any other shape stays.
     CAM=$("$PY" - <<'PYEOF' 2>/dev/null
 import json, urllib.request
 URL = "/bedlet_grid.html?v=2"
@@ -519,10 +521,12 @@ cams = [c for c in call("GET", "/server/webcams/list")["webcams"]
 if not cams:
     call("POST", "/server/webcams/item", {
         "name": "Modular Bed", "service": "iframe", "stream_url": URL,
-        "aspect_ratio": "1:1", "location": "printer", "enabled": True})
+        "aspect_ratio": "3:4", "location": "printer", "enabled": True})
     print("added")
 elif cams[0]["stream_url"] == "/bedlet_grid.html":
     cam = dict(cams[0]); cam.pop("source", None); cam["stream_url"] = URL
+    if cam.get("aspect_ratio") == "1:1":
+        cam["aspect_ratio"] = "3:4"
     call("POST", "/server/webcams/item", cam)
     print("moved")
 else:
@@ -534,7 +538,7 @@ PYEOF
         moved) echo "  camera: the bedlet grid camera now loads the new page (?v=2)" ;;
         there) echo "  camera: a bedlet grid camera is already there" ;;
         *)     echo "  WARNING: Moonraker did not take the camera entry - add it by hand:"
-               echo "  name Modular Bed, service iframe, URL /bedlet_grid.html?v=2, 1:1" ;;
+               echo "  name Modular Bed, service iframe, URL /bedlet_grid.html?v=2, 3:4" ;;
     esac
 else
     echo "  NOTE: no Mainsail/Fluidd nginx site found - bedlet grid page not set up"
