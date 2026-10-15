@@ -128,6 +128,19 @@ picks and parks tools.
   the wizards restart Klipper after every tool, so the bed no longer walks
   down tool by tool
 
+### Modular bed in Mainsail and KlipperScreen
+- the modular bed is a **normal heated bed** for Klipper's screens: a
+  **Heater Bed** row with a target box in Mainsail, in its presets, on
+  KlipperScreen with its number pad, and `B:` in `M105` - the bed's own stock
+  firmware still does the heating
+- **bed zones**: on the bedlet grid camera, tap the bedlets you want, set a
+  temperature and press **Heat selected** - those bedlets heat, their
+  neighbours are warmed part-way the way Prusa does around a print; **Heat
+  all** and **Off** too. Each bedlet shows its own target. Console:
+  `SET_BED_ZONES ZONES=1,2,5 S=60`
+- the bedlet grid page also opens on its own in a browser:
+  `http://<your Pi>/bedlet_grid.html`
+
 ### More
 - the **bedlet grid is set up as a camera** ("Modular Bed") by the installer
 - the tool buttons are watched by each tool itself - holding one never holds
@@ -177,6 +190,7 @@ Step by step, with pictures: **[docs/INSTALL.md](docs/INSTALL.md)**.
 | `SPOOL_JOIN TO=` / `SPOOL_JOIN_STATUS` / `SPOOL_JOIN_RESET` | carry on with another tool after a runout |
 | `BED_STATUS` | the 16 bed zones |
 | `SET_BED_AREA X0= Y0= X1= Y1=` / `CLEAR_BED_AREA` | heat only an area of the bed / the whole bed |
+| `SET_BED_ZONES ZONES=1,2,5\|ALL [S=]` | heat the bedlets you pick (the grid's B numbers) / the whole bed |
 | `NOZZLE_LEDS STATE=ON\|OFF\|ALWAYS [TOOL=]` | nozzle lights |
 | `TURN_OFF_HEATERS` | every heater off - the modular bed too |
 | `QUERY_DOCK` / `QUERY_SIDE_SENSORS` / `QUERY_TOOL_FSENSOR` | raw sensor readings |

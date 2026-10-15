@@ -1,5 +1,35 @@
 # Changelog
 
+## Updates since v1.0.0 - 2026-10-15 (from Mainsail's update list)
+
+**The modular bed in Mainsail and KlipperScreen.** The bed is now a normal
+heated bed for Klipper's screens: a **Heater Bed** row with a target box in
+Mainsail and in its presets, the bed on KlipperScreen with its number pad,
+and `B:` in `M105`. The bed's own stock firmware still does the heating. The
+separate "Modular Bed" temperature row is gone - it showed the same.
+
+**Bed zones.** On the bedlet grid camera: tap bedlets, set a temperature and
+press **Heat selected** - the chosen bedlets heat and their neighbours are
+warmed part-way, as Prusa does around a print area; **Heat all** and **Off**
+too, and each bedlet shows its own target. Console:
+`SET_BED_ZONES ZONES=1,2,5 S=60` or `ZONES=ALL`. Not while printing: a
+print's own area takes over, and the whole bed comes back after it.
+
+**Start-up clock check.** Each tool's clock estimate now settles before the
+next tool boots. The occasional "MCU 'dwarf_t3' configured for 56Mhz but
+running at 55Mhz" warning at start-up came from that first estimate - the
+tools' crystals were always right (56.000 MHz); none showed in the test
+restarts after the change. Start-up takes a few seconds longer.
+
+**Bedlet grid page** always loads fresh after an update (browsers re-check
+it, and the camera's address is now `/bedlet_grid.html?v=2`); any spelling
+of its address works.
+
+**After this update** Mainsail asks you to finish it with the installer page
+(it adds the bed's `[heater_bed]` section and the new grid page): power menu
+(top right) → **Service Control** → **KlipperXL-Plus-installer** → start, then
+open `http://<your Pi>:8099`.
+
 ## v1.0.0 - 2026-10-13
 
 The first public release of KlipperXL-Plus: everything

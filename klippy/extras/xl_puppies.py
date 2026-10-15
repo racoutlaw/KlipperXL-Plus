@@ -200,23 +200,47 @@ class _SensorName:
         return default
 
 class BedSensor:
-    def __init__(self, puppies, bedlet=None):
+    """One bedlet (_Bedlet_NN: hidden in Mainsail, read by bedlet_grid.html).
+    The whole bed's average + target is heater_bed (BedHeater) - the
+    'Modular_Bed' sensor that showed the same was dropped (owner 10/14)."""
+    def __init__(self, puppies, bedlet):
         self.puppies = puppies
         self.bedlet = bedlet
-        self.name = ("Modular_Bed" if bedlet is None
-                     else "_Bedlet_%02d" % (bedlet + 1,))
+        self.name = "_Bedlet_%02d" % (bedlet + 1,)
     def get_temp(self, eventtime):
-        if self.bedlet is None:
-            return self.puppies.bed_average(), 0.
         return self.puppies.bed_measured.get(self.bedlet, 0.), 0.
     def get_status(self, eventtime):
-        temp = round(self.get_temp(eventtime)[0], 1)
-        if self.bedlet is None:
-            return {'temperature': temp,
-                    'target': round(self.puppies.bed_target, 1)}
-        return {'temperature': temp}
+        # its own target too: the grid page shows which zones are on
+        return {'temperature': round(self.get_temp(eventtime)[0], 1),
+                'target': round(self.puppies.bed_targets[self.bedlet], 1)}
     def stats(self, eventtime):
         return False, '%s: temp=%.1f' % (self.name, self.get_temp(eventtime)[0])
+
+class BedHeater:
+    """The modular bed as 'heater_bed' for Mainsail / Fluidd: a bed row with a
+    target box and presets (owner 10/13; Teaching Tech, KlipperXL #21: "I
+    can't see a way to manually control or see the bed temp").  The bed's
+    own firmware heats it; a target set here goes the M140 way
+    (set_bed_target: the whole bed, or the print area SET_BED_AREA chose).
+    Listed in heaters.available_heaters (what Mainsail / Fluidd show), as
+    sensor 'heater_bed' (M105 "B:", TEMPERATURE_WAIT) and with its own
+    SET_HEATER_TEMPERATURE HEATER=heater_bed - NOT in PrinterHeaters.heaters:
+    PID_CALIBRATE, heater_fan, homing_heaters, verify_heater look heaters up
+    there and would call PID methods this bed does not have (pid_calibrate
+    turns an unknown heater into a plain error).  The bed does not report
+    its heater power, so no 'power' is given."""
+    def __init__(self, puppies):
+        self.puppies = puppies
+    def get_temp(self, eventtime):
+        return self.puppies.bed_average(), self.puppies.bed_target
+    def set_temp(self, degrees):
+        self.puppies.set_bed_target(degrees)
+    def check_busy(self, eventtime):
+        temp, target = self.get_temp(eventtime)
+        return target > 0. and abs(temp - target) > 2.    # M190's tolerance
+    def get_status(self, eventtime):
+        temp, target = self.get_temp(eventtime)
+        return {'temperature': round(temp, 1), 'target': round(target, 1)}
 
 
 ######################################################################
@@ -241,6 +265,7 @@ class XLPuppies:
         self.bed_targets = [0.] * NUM_BEDLETS
         self.bed_target = 0.
         self.bed_area = None
+        self.bed_zones = None         # SET_BED_ZONES: chosen bedlets (mask)
         self.bed_mask = 0xFFFF
         self.bed_faults_cleared = False
         self._bed_last = 0.
@@ -250,17 +275,39 @@ class XLPuppies:
         # Sensors exist from config time so Mainsail always lists them
         pheaters = self.printer.load_object(config, 'heaters')
         self.sensors = [BedSensor(self, i) for i in range(NUM_BEDLETS)]
-        self.sensors.append(BedSensor(self))
         for s in self.sensors:
             full = "temperature_sensor " + s.name
             pheaters.register_sensor(_SensorName(full), s)
             self.printer.add_object(full, s)
+        # the bed as heater_bed (BedHeater: display list + its own commands).
+        # Its limits come from a [heater_bed] section (xl_base.cfg, after this
+        # one): read here they are config settings - Mainsail checks a typed
+        # target against settings.heater_bed.max_temp ("TempTooHigh" without
+        # it) and KlipperScreen lists a bed only if the config has the section
+        bed_cfg = config.getsection('heater_bed')
+        self.bed_min_temp = bed_cfg.getfloat('min_temp', 0., minval=0.)
+        self.bed_max_temp = bed_cfg.getfloat('max_temp', BED_MAX_TEMP,
+                                             above=self.bed_min_temp,
+                                             maxval=BED_MAX_TEMP)
+        # KlipperScreen's number pad reads config[heater]['control'] (KeyError
+        # without it, owner 10/14) to offer PID / MPC calibration - the bed's
+        # own firmware regulates it, so only 'watermark' (no calibration)
+        bed_cfg.getchoice('control', {'watermark': 'watermark'}, 'watermark')
+        self.bed_heater = BedHeater(self)
+        self.printer.add_object('heater_bed', self.bed_heater)
+        pheaters.available_heaters.append('heater_bed')
+        pheaters.register_sensor(_SensorName('heater_bed'), self.bed_heater,
+                                 gcode_id='B')
+        self.gcode.register_mux_command(
+            "SET_HEATER_TEMPERATURE", "HEATER", "heater_bed",
+            self.cmd_SET_HEATER_TEMPERATURE_bed,
+            desc="Set the modular bed temperature (as M140)")
         self.printer.register_event_handler("klippy:connect",
                                             self._handle_connect)
         self.printer.register_event_handler("klippy:shutdown",
                                             self._handle_shutdown)
         for cmd in ('M140', 'M190', 'SET_BED_AREA', 'CLEAR_BED_AREA',
-                    'BED_STATUS', 'RS485_STATS'):
+                    'SET_BED_ZONES', 'BED_STATUS', 'RS485_STATS'):
             self.gcode.register_command(cmd, getattr(self, 'cmd_' + cmd),
                                         desc=getattr(self, 'cmd_%s_help'
                                                      % cmd, None))
@@ -529,14 +576,19 @@ class XLPuppies:
     def set_bed_target(self, target):
         if not self.modular_bed_booted:
             raise self.gcode.error("Modular bed not running")
-        if target > BED_MAX_TEMP:
+        # [heater_bed] max_temp, at most the bed's own BED_MAX_TEMP
+        if target > self.bed_max_temp:
             raise self.gcode.error("Bed target %.1f above %.0f"
-                                   % (target, BED_MAX_TEMP))
+                                   % (target, self.bed_max_temp))
         self.bed_target = target
-        if target <= 0 or self.bed_area is None:
+        if target <= 0 or (self.bed_area is None and self.bed_zones is None):
             self._write_targets([max(target, 0.)] * NUM_BEDLETS)
             return
-        self.bed_mask = self._expand_to_sides(self._area_mask(*self.bed_area))
+        if self.bed_zones is not None:          # SET_BED_ZONES: as chosen
+            self.bed_mask = self.bed_zones
+        else:                                   # a print's area (stock)
+            self.bed_mask = self._expand_to_sides(
+                self._area_mask(*self.bed_area))
         self._write_targets(self._gradient(self.bed_mask, target))
     # G-Code
     cmd_TURN_OFF_HEATERS_help = "Turn off all heaters, the modular bed too"
@@ -544,6 +596,8 @@ class XLPuppies:
         self._base_turn_off_heaters(gcmd)
         if self.modular_bed_booted:
             self.set_bed_target(0.)
+    def cmd_SET_HEATER_TEMPERATURE_bed(self, gcmd):
+        self.set_bed_target(gcmd.get_float('TARGET', 0.))
     cmd_M140_help = "Set modular bed temperature"
     def cmd_M140(self, gcmd):
         bedlet = gcmd.get_int('B', None, minval=0, maxval=NUM_BEDLETS - 1)
@@ -579,6 +633,7 @@ class XLPuppies:
         if x1 <= x0 or y1 <= y0:
             raise gcmd.error("Invalid bed area")
         self.bed_area = (x0, y0, x1, y1)
+        self.bed_zones = None         # the print's area wins over a choice
         self.bed_mask = self._expand_to_sides(self._area_mask(*self.bed_area))
         if self.bed_target > 0:
             self.set_bed_target(self.bed_target)
@@ -587,9 +642,58 @@ class XLPuppies:
     cmd_CLEAR_BED_AREA_help = "Heat the whole bed again"
     def cmd_CLEAR_BED_AREA(self, gcmd):
         self.bed_area = None
+        self.bed_zones = None
         self.bed_mask = 0xFFFF
         if self.bed_target > 0:
             self.set_bed_target(self.bed_target)
+    cmd_SET_BED_ZONES_help = ("Heat chosen bedlets: ZONES=1,2,5 (the B numbers"
+                              " of the bedlet grid) or ZONES=ALL [S=temp]")
+    def cmd_SET_BED_ZONES(self, gcmd):
+        """Owner 10/14: heat the whole bed or just the bedlets you pick (the
+        bedlet grid page).  Exactly the chosen ones get the target; their
+        neighbours are warmed part-way by Prusa's print-area gradient
+        (_gradient) so no hot bedlet sits next to a cold one - not stretched
+        to the bed edges as a print area is (_expand_to_sides).  Not while a
+        print runs: START_PRINT's SET_BED_AREA chooses then, and END_PRINT /
+        CANCEL_PRINT go back to the whole bed (CLEAR_BED_AREA)."""
+        stats = self.printer.lookup_object('print_stats', None)
+        state = (stats.get_status(self.reactor.monotonic())['state']
+                 if stats is not None else '')
+        if state in ('printing', 'paused'):
+            raise gcmd.error("SET_BED_ZONES refused: a print is %s" % (state,))
+        arg = gcmd.get('ZONES').strip().upper()
+        if arg == 'ALL':
+            mask = 0xFFFF
+        else:
+            mask = 0
+            for part in arg.replace(' ', '').split(','):
+                try:
+                    n = int(part.lstrip('B'))
+                except ValueError:
+                    raise gcmd.error("SET_BED_ZONES: '%s' is not a bedlet"
+                                     " number (1-16)" % (part,))
+                if not 1 <= n <= NUM_BEDLETS:
+                    raise gcmd.error("SET_BED_ZONES: bedlet %d - there are"
+                                     " 1 to 16" % (n,))
+                mask |= 1 << (n - 1)
+            if not mask:
+                raise gcmd.error("SET_BED_ZONES: no bedlets given")
+        # every check before anything changes: a refused command leaves the
+        # bed as it was (test 10/14: S=130 had already changed the zones)
+        target = gcmd.get_float('S', self.bed_target, minval=0.)
+        if not self.modular_bed_booted:
+            raise gcmd.error("Modular bed not running")
+        if target > self.bed_max_temp:
+            raise gcmd.error("Bed target %.1f above %.0f"
+                             % (target, self.bed_max_temp))
+        self.bed_area = None
+        self.bed_zones = None if mask == 0xFFFF else mask
+        self.bed_mask = mask
+        self.set_bed_target(target)
+        names = ("all 16 bedlets" if mask == 0xFFFF else ", ".join(
+            "B%02d" % (i + 1,) for i in range(NUM_BEDLETS) if mask & (1 << i)))
+        gcmd.respond_info("Bed: %s at %s" % (
+            names, "%.0f C" % (target,) if target > 0 else "off"))
     cmd_BED_STATUS_help = "Show bedlet temperatures and targets"
     def cmd_BED_STATUS(self, gcmd):
         lines = ["Modular bed %s, target %.1f, avg %.1f"
@@ -609,6 +713,9 @@ class XLPuppies:
         return {'modular_bed_booted': self.modular_bed_booted,
                 'bed_target': self.bed_target,
                 'bed_area': self.bed_area,
+                'bed_zones': ([i + 1 for i in range(NUM_BEDLETS)
+                               if self.bed_zones & (1 << i)]
+                              if self.bed_zones is not None else None),
                 'bed_mask': self.bed_mask,
                 'reset_lines': self.reset_value}
 

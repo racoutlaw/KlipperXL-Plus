@@ -229,7 +229,12 @@ it runs.
 
 The installer also adds a **"Modular Bed" camera** to Mainsail: the bed's 16
 zones with their temperatures, live (Mainsail: the webcam panel; Fluidd:
-Cameras). It is yours to rename, move or delete.
+Cameras). It is yours to rename, move or delete. Tap bedlets there and press
+**Heat selected** to heat only those (their neighbours are warmed part-way,
+as Prusa does around a print), or **Heat all** / **Off**.
+
+The bed itself is a normal **Heater Bed** in Mainsail's temperature panel and
+on KlipperScreen: set it there like any heater.
 
 ## 5. Calibrate
 

@@ -56,8 +56,9 @@ FS_POLL = 0.5          # s between filament sensor checks (insert / remove)
 RESUME_DELAY = 8.      # s after klippy:ready: tools detected, screens back
 # One-tool printer: no other tool to compare with; the stock-firmware bed
 # reads room temperature at rest too (printer 10/05: bed 27.0, nozzles
-# 27.5-28.7 C).
-ROOM_SENSOR = 'temperature_sensor Modular_Bed'
+# 27.5-28.7 C).  The bed's average is heater_bed (xl_puppies BedHeater;
+# the 'temperature_sensor Modular_Bed' it replaced was dropped 10/14).
+ROOM_SENSOR = 'heater_bed'
 SAVE_VARIABLE = 'kxl_wizard'
 # filament sensor calibration: with only the empty reading known, a sensor
 # sees filament once its reading is more than this far from empty - Prusa

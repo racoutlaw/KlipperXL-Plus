@@ -147,6 +147,33 @@
     margin-bottom: 8px;
   }
 
+  /* zone choice (owner 10/14): tap bedlets, then Heat selected */
+  .bedlet { cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent; }
+  .bedlet.sel { box-shadow: 0 0 0 3px #89b4fa inset; }
+  .bedlet.sel .label { color: #89b4fa; }
+
+  .controls {
+    margin-top: 8px;
+    padding: 8px;
+    background: #181825;
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  .ctl-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .ctl-row input {
+    width: 64px; padding: 6px; border-radius: 6px; border: 1px solid #45475a;
+    background: #1e1e2e; color: #cdd6f4; font-size: 14px; text-align: right;
+  }
+  .ctl-row button {
+    flex: 1; min-width: 80px; padding: 8px 6px; border-radius: 6px; border: 0;
+    background: #313244; color: #cdd6f4; font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .ctl-row button:disabled { opacity: 0.4; cursor: default; }
+  .ctl-row button.heat { background: #45475a; }
+  .ctl-row button.off { background: #3b2633; color: #f38ba8; }
+  .ctl-hint { margin-top: 6px; color: #a6adc8; min-height: 16px; }
+  .ctl-hint a { color: #89b4fa; cursor: pointer; text-decoration: underline; }
+
   @media (max-width: 300px) {
     .bedlet { min-height: 60px; }
     .bedlet .temp { font-size: 16px; }
@@ -186,6 +213,17 @@
       <div class="slab">Max</div>
     </div>
   </div>
+
+  <div class="controls">
+    <div class="ctl-row">
+      <input id="setTemp" type="number" min="1" max="120" step="1" value="60"
+             title="Bed temperature">&deg;C
+      <button id="btnSel" class="heat" disabled>Heat selected</button>
+      <button id="btnAll" class="heat">Heat all</button>
+      <button id="btnOff" class="off">Off</button>
+    </div>
+    <div class="ctl-hint" id="ctlHint">Tap bedlets to choose which to heat.</div>
+  </div>
 </div>
 
 <script>
@@ -204,10 +242,13 @@ const BEDLET_MAP = [
 // *.lan) refuses it when the printer is opened by its IP address.
 const MOONRAKER = window.location.origin;
 
-// State: temps[1..16] = current temperature
+// State: temps[1..16] = current temperature, targets[1..16] = each bedlet's
+// own target (zones + Prusa's warm-up of their neighbours)
 let temps = {};
+let targets = {};
 let bedTarget = 0;
 let bedAvgTemp = 0;
+const selected = new Set();     // bedlets tapped for "Heat selected"
 
 // Color based on temperature
 function tempColor(t) {
@@ -238,6 +279,7 @@ function buildGrid() {
         `<span class="label">B${pad}</span>` +
         `<span class="temp" id="t${num}">--<span class="unit">&deg;</span></span>` +
         `<span class="target" id="tgt${num}"></span>`;
+      cell.addEventListener('click', () => toggleBedlet(num));
       grid.appendChild(cell);
     }
   }
@@ -259,11 +301,10 @@ function showBedlet(num) {
   tempEl.style.color = c.text;
   tempEl.innerHTML = `${Math.round(t)}<span class="unit">&deg;</span>`;
 
-  if (bedTarget > 0) {
-    tgtEl.textContent = `\u2192 ${Math.round(bedTarget)}\u00b0`;
-  } else {
-    tgtEl.textContent = '';
-  }
+  // this bedlet's own target (a chosen zone, or a neighbour warmed part-way)
+  const tg = targets[num] !== undefined ? targets[num] : bedTarget;
+  tgtEl.textContent = tg > 0 ? `\u2192 ${Math.round(tg)}\u00b0` : '';
+  cell.classList.toggle('sel', selected.has(num));
 }
 
 // Update all cells and summary
@@ -294,14 +335,84 @@ function parseStatus(status) {
     if (m && val.temperature !== undefined) {
       temps[parseInt(m[1])] = val.temperature;
     }
+    if (m && val.target !== undefined) {
+      targets[parseInt(m[1])] = val.target;
+    }
 
-    // Modular_Bed average sensor has the target
-    if (key.toLowerCase().includes('modular_bed')) {
+    // heater_bed (the modular bed as Klipper's bed) has the average + target
+    if (key === 'heater_bed') {
       if (val.temperature !== undefined) bedAvgTemp = val.temperature;
       if (val.target !== undefined) bedTarget = val.target;
     }
   }
   refreshDisplay();
+}
+
+// ---- zone choice (owner 10/14): the bed's SET_BED_ZONES / M140 ----------
+function toggleBedlet(num) {
+  if (selected.has(num)) selected.delete(num); else selected.add(num);
+  refreshDisplay();
+  updateControls();
+}
+function clearSelection() {
+  selected.clear();
+  refreshDisplay();
+  updateControls();
+}
+function updateControls(msg) {
+  const nums = [...selected].sort((a, b) => a - b);
+  document.getElementById('btnSel').disabled = nums.length === 0;
+  const hint = document.getElementById('ctlHint');
+  if (msg) {
+    hint.textContent = msg;
+  } else if (nums.length) {
+    hint.innerHTML = `Selected: ${nums.map(n => 'B' + String(n).padStart(2, '0')).join(', ')}` +
+      ` &nbsp;<a onclick="clearSelection()">clear</a>`;
+  } else {
+    hint.textContent = 'Tap bedlets to choose which to heat.';
+  }
+}
+function readTemp() {
+  const t = parseFloat(document.getElementById('setTemp').value);
+  if (!(t >= 1 && t <= 120)) {
+    updateControls('Temperature: 1 to 120 °C');
+    return null;
+  }
+  return Math.round(t);
+}
+async function sendGcode(script, okMsg) {
+  try {
+    const resp = await fetch(`${MOONRAKER}/printer/gcode/script`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ script: script }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      updateControls(data.error.message || 'The printer refused it');
+      return;
+    }
+    updateControls(okMsg);
+    poll();
+  } catch (e) {
+    updateControls('Cannot reach printer');
+  }
+}
+function heatSelected() {
+  const t = readTemp();
+  if (t === null || selected.size === 0) return;
+  const nums = [...selected].sort((a, b) => a - b);
+  sendGcode(`SET_BED_ZONES ZONES=${nums.join(',')} S=${t}`,
+            `Heating ${nums.length} bedlet${nums.length > 1 ? 's' : ''} to ${t}°`
+            + ' (neighbours warmed part-way)');
+}
+function heatAll() {
+  const t = readTemp();
+  if (t === null) return;
+  sendGcode(`SET_BED_ZONES ZONES=ALL S=${t}`, `Heating the whole bed to ${t}°`);
+}
+function bedOff() {
+  sendGcode('M140 S0', 'Bed off');
 }
 
 // Poll Moonraker REST API (simple, reliable)
@@ -310,7 +421,7 @@ async function poll() {
   for (let i = 1; i <= 16; i++) {
     objects.push(`temperature_sensor _Bedlet_${String(i).padStart(2,'0')}`);
   }
-  objects.push('temperature_sensor Modular_Bed');
+  objects.push('heater_bed');
 
   const query = objects.map(o => encodeURIComponent(o)).join('&');
   const url = `${MOONRAKER}/printer/objects/query?${query}`;
@@ -334,6 +445,9 @@ async function poll() {
 
 // Initialize
 buildGrid();
+document.getElementById('btnSel').addEventListener('click', heatSelected);
+document.getElementById('btnAll').addEventListener('click', heatAll);
+document.getElementById('btnOff').addEventListener('click', bedOff);
 poll();
 setInterval(poll, 2000);
 </script>
