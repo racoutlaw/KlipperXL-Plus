@@ -27,6 +27,15 @@ of its address works. Its camera is taller now (3:4): in Mainsail's camera
 panel on a computer screen the whole page shows without scrolling. A camera
 still at v1.0.0's 1:1 is changed; any other shape you chose is kept.
 
+**Parked tools get their tool-change retract back.** In a multi-tool print
+the slicer pulls a tool's filament back a little when it parks it (2 mm in
+our OrcaSlicer tests) and pushes it back when it picks that tool again - but
+not on a tool's first pick in the next print, so each parked tool started
+that print short. Now, as stock Prusa firmware does, every tool's extruder
+moves are counted, how far each tool is pulled back is remembered at the end
+of a print or a cancel, and it is given back on that tool's first extrusion
+of the next print.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section and the new grid page): power menu
 (top right) → **Service Control** → **KlipperXL-Plus-installer** → start, then

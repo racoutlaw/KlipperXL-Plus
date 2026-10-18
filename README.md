@@ -103,6 +103,9 @@ picks and parks tools.
 - **end of print**: the filament is pulled back out of the melt zone, and
   given back on that tool's **first extrusion** of the next print (as stock's
   planner does) - no dry first perimeters, no ooze while it sits
+- **multi-tool prints**: the slicer's small retract when it parks a tool is
+  remembered at the end of the print (stock's retract tracker) and given back
+  the same way - no tool starts the next print short
 - a hot unload ends as stock does: *"pull the filament out of the
   extruder"*; a filament already out of the nozzle unloads cold
 - stock **`M600`** filament change and **`M591`** runout on / off

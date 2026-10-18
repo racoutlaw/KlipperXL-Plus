@@ -67,6 +67,15 @@ RUNOUT_RAM_SEQ = ((7, 1500), (-50, 2700), (-5, 50), (-50, 1500))
 SAFELY_RETRACTED = 20.    # minimum_auto_retract_distance
 PROBE_RETRACT = 20.       # probe.cpp: "Retract to standard distance"
 PROBE_RETRACT_MIN = 5.    # probe.cpp: already retracted this much -> skip
+# Retract tracker = retract_tracker.cpp RetractTracker: how far each tool's
+#   filament sits back from the nozzle, from every E move since start-up,
+#   0..40 mm.  Starts at 40 (unknown); trusted once it has come down to 0
+#   (filament all the way in), not any more once it is back at 40.  In a
+#   multi-tool print the slicer retracts at each tool change and the firmware
+#   does not know - at print end / cancel every trusted tool's distance
+#   becomes its record (marlin_server.cpp pre_finalize_print), so a parked
+#   tool gets the slicer's retract back on its first extrusion next print.
+TRACK_MAX = 40.           # RetractTracker::extruder_to_nozzle_distance
 UNLOAD_LENGTH = 105.      # FILAMENT_CHANGE_UNLOAD_LENGTH
 UNLOAD_SPEED = 27.        # FILAMENT_CHANGE_UNLOAD_FEEDRATE mm/s
 DERETRACT_SPEED = 18.     # FILAMENT_CHANGE_FAST_LOAD_FEEDRATE mm/s
@@ -110,6 +119,8 @@ class XLFilament:
         self._runout_count = {}           # tool -> no_filament readings in a row
         self._runout_pending = False      # a runout PAUSE is queued
         self._pending = set()             # tools with a pulled-back filament
+        self._tracked = [TRACK_MAX] * NUM_TOOLS   # retract tracker, mm back
+        self._track_ok = [False] * NUM_TOOLS      # retract tracker trusted
         self._gm = None
         for cmd, desc in (
                 ('LOAD_FILAMENT', "Load filament into a tool (Prusa M701)"),
@@ -141,6 +152,16 @@ class XLFilament:
                 cmd, lambda gcmd, o=orig: self._cmd_move(gcmd, o))
         self._pending = set(t for t in range(NUM_TOOLS)
                             if self._melt(t) > 0.)
+        # retract tracker: stock counts every E move in the planner
+        # (planner.cpp l.2411); Klipper checks each move on the extruder that
+        # makes it
+        tracked = []
+        for t in range(NUM_TOOLS):
+            ext = self.printer.lookup_object(self._ext_name(t), None)
+            if ext is not None:
+                self._track_extruder(t, ext)
+                tracked.append("T%d" % (t,))
+        logging.info("xl_filament: retract tracker on %s", " ".join(tracked))
         sv = self.printer.lookup_object('save_variables', None)
         if sv is not None:
             self.runout_enabled = bool(
@@ -212,9 +233,40 @@ class XLFilament:
         finally:
             if saved is not None:
                 extruder.max_e_accel = saved
+    # retract tracker (RetractTracker::track_extruder_move), after Klipper
+    # has accepted the move (a refused one did not happen)
+    def _track_extruder(self, tool, ext):
+        check = ext.check_move
+        def check_move(move, *args):
+            check(move, *args)
+            self._track(tool, move.axes_d[args[0] if args else 3])
+        ext.check_move = check_move
+    def _track(self, tool, de):
+        d = min(max(self._tracked[tool] - de, 0.), TRACK_MAX)
+        self._tracked[tool] = d
+        if not self._track_ok[tool] and d == 0.:
+            self._track_ok[tool] = True
+        elif self._track_ok[tool] and d == TRACK_MAX:
+            self._track_ok[tool] = False
+    # stock pre_finalize_print: every trusted tool's tracked distance becomes
+    # its record, in whole mm (config_store rounds: std::round)
+    def _save_tracked(self, gcmd):
+        saved = []
+        for t in range(NUM_TOOLS):
+            if not self._track_ok[t]:
+                continue
+            mm = float(int(self._tracked[t] + .5))
+            if mm != self._melt(t):
+                self._set_melt(t, mm)
+            if mm:
+                saved.append("T%d %.0f mm" % (t, mm))
+        if saved:
+            gcmd.respond_info("Retract tracker: %s pulled back"
+                              % (", ".join(saved),))
     # melt_retract_tN = how many mm this tool's filament is pulled back
     # (stock AutoRetract::retracted_distance, kept in config_store; here in
-    # save_variables).  Every pull-back records it; the give-back clears it.
+    # save_variables).  Every pull-back records it, so does the retract
+    # tracker at print end; the give-back clears it.
     def _melt(self, tool):
         sv = self.printer.lookup_object('save_variables', None)
         if sv is None:
@@ -454,10 +506,12 @@ class XLFilament:
             # filament slid out with a clean tip.  Not a warning.
             gcmd.respond_info("T%d: unloaded - pull the filament out of the"
                               " extruder" % (tool,))
-    # stock AutoRetract::maybe_retract_from_nozzle (print end and cancel,
-    # marlin_server.cpp pre_finalize_print): the picked tool, if hot and not
-    # already pulled back >= 20 mm
+    # stock marlin_server.cpp pre_finalize_print (print end and cancel): the
+    # retract tracker's distances saved, then AutoRetract::
+    # maybe_retract_from_nozzle - the picked tool, if hot and not already
+    # pulled back >= 20 mm
     def cmd_XL_AUTO_RETRACT(self, gcmd):
+        self._save_tracked(gcmd)
         tc = self.printer.lookup_object('xl_toolchanger')
         tool = gcmd.get_int('TOOL', tc.active_tool)
         if tool < 0 or tool != tc.active_tool:
@@ -471,13 +525,16 @@ class XLFilament:
             return
         if self._melt(tool) >= SAFELY_RETRACTED:
             return
-        gcmd.respond_info("T%d: pulling the filament out of the nozzle (stock"
-                          " auto retract)..." % (tool,))
         # stock checks the temperature once, at the start; Mainsail's
         # CANCEL_PRINT has already turned the heaters off, and the ~17 s
         # sequence must not stop half way when the nozzle passes 170 C
         heater, saved_min = self._cold_ok(tool)
         try:
+            # stock maybe_deretract_to_nozzle first: what the slicer left
+            # pulled back goes in, so the ramming starts from a full nozzle
+            self.give_back(tool)
+            gcmd.respond_info("T%d: pulling the filament out of the nozzle"
+                              " (stock auto retract)..." % (tool,))
             self._run_seq(AUTO_RETRACT_SEQ)
         finally:
             heater.min_extrude_temp = saved_min
