@@ -36,8 +36,16 @@ moves are counted, how far each tool is pulled back is remembered at the end
 of a print or a cancel, and it is given back on that tool's first extrusion
 of the next print.
 
+**Probe waits for the head to settle.** Before every loadcell tap (Z home,
+each mesh point, `PROBE`) the head now stands still 0.5 s and the loadcell is
+zeroed over 0.15 s, as the original KlipperXL did. Klipper zeroed it the
+moment the travel move ended, with the head still shaking: in our test the
+first tap at a point read on average 0.021 mm high (up to 0.044 mm), with
+the wait 0.007 mm. A 7x6 mesh takes about 24 s longer.
+
 **After this update** Mainsail asks you to finish it with the installer page
-(it adds the bed's `[heater_bed]` section and the new grid page): power menu
+(it adds the bed's `[heater_bed]` section, the new grid page and the longer
+loadcell zeroing in each tool's file): power menu
 (top right) → **Service Control** → **KlipperXL-Plus-installer** → start, then
 open `http://<your Pi>:8099`.
 

@@ -23,7 +23,11 @@
 #   z_offset: 0                       # loadcell triggers at nozzle contact
 #
 # Every probe (Z home, each mesh point) is tared just before it moves:
-# LoadCellProbingMove.probing_move -> _pause_and_tare (Klipper).
+# LoadCellProbingMove.probing_move -> _pause_and_tare (Klipper).  Klipper
+# takes that tare the moment the last move ends, so after a travel move it
+# caught the head still shaking (owner 10/18: the first tap at each point
+# read up to 0.044 mm high).  The head now stands SETTLE_TIME first, as
+# released KlipperXL did before every probe.
 #
 # Copyright (C) 2026  Richard Crook
 #
@@ -37,6 +41,13 @@ from .xl_load_cell import XLLoadCell, XLLoadCellSelect
 # load_cell_probe.py imports NumPy only inside LoadCellPrinterProbe.__init__
 # ("global np"); its other classes, used here, need the module-level name.
 lcp.np = numpy
+
+# Released KlipperXL, before every probe after a move (puppy_bootloader.py
+# run_probe): 0.2 s "wait for vibration to dampen after travel move", then
+# 0.3 s (Prusa Z_FIRST_PROBE_DELAY "let vibrations settle before tare"), then
+# a 48-sample tare (tool_template.cfg tare_time 0.15).  A dwell, so the tare's
+# samples (collected from the toolhead's last move time) start after it.
+SETTLE_TIME = 0.5
 
 
 class XLToolProbe:
@@ -82,6 +93,7 @@ class _StreamingSession:
         self._router = router
         self._open = True
     def run_probe(self, gcmd):
+        self._router.printer.lookup_object('toolhead').dwell(SETTLE_TIME)
         return self._session.run_probe(gcmd)
     def pull_probed_results(self):
         return self._session.pull_probed_results()
