@@ -276,7 +276,7 @@ everything happens here.</p>
 <ul class="steps" id="steps"></ul>
 <div id="view"></div>
 <div class="card">
-  <details id="det"><summary>Show everything the installer is doing</summary>
+  <details id="det" open><summary>Installer log</summary>
   <pre id="log"></pre></details>
   <div class="now-line" id="last"></div>
 </div>

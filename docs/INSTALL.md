@@ -166,8 +166,8 @@ The page starts with the appendix warning. Then:
 - **your Pi password** (the one from Raspberry Pi Imager) - the installer
   needs it to install packages; it is used once and not saved
 
-Press **Start**. Keep the page open - you can watch everything it does under
-*Show everything the installer is doing*.
+Press **Start**. Keep the page open - everything it does shows in the
+*Installer log* window.
 
 ### 4.2 Run first: preparing (10-20 minutes)
 

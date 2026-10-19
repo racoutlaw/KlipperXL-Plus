@@ -43,6 +43,10 @@ moment the travel move ended, with the head still shaking: in our test the
 first tap at a point read on average 0.021 mm high (up to 0.044 mm), with
 the wait 0.007 mm. A 7x6 mesh takes about 24 s longer.
 
+**Installer log open from the start.** The installer page's log window
+(now called **Installer log**) is open when the page loads, so you can see
+the installer working from the first step.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section, the new grid page and the longer
 loadcell zeroing in each tool's file): power menu
