@@ -510,6 +510,10 @@ class XLToolchanger:
         single = bool(gcmd.get_int('SINGLE', int(self._single_slot(tool))))
         z = gcmd.get_float('Z', None)
         if z is None:
+            # without Z= the value is read from the picked tool's live offset
+            if tool != self.active_tool:
+                raise gcmd.error("T%d is not picked - give Z= to set its"
+                                 " fine-tune" % (tool,))
             total = self.printer.lookup_object('gcode_move').homing_position[2]
             z = total + (self.offsets[tool][2]
                          - self.offsets[self.z_home_tool][2])
@@ -705,6 +709,11 @@ class XLToolchanger:
             self._move(x=dock_x, speed=SLOW_SPEED)
             self._settle()
             if not dock.is_parked():
+                # still the active tool: give back what the park took away
+                # above, or a later T<n> ("already picked") prints without
+                # its offset and loadcell
+                self._select_loadcell(tool)
+                self._apply_offset(tool)
                 raise gcmd.error("T%d not reporting parked after insert!"
                                  % (tool,))
         self.active_tool = -1

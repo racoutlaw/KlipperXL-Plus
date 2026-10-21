@@ -227,7 +227,7 @@ class XLLoadCellProbeRouter:
         backoff = gcmd.get_float('BACKOFF', 2.0, above=0.)
         repeat_backoff = gcmd.get_float('REPEAT_BACKOFF', 0.5, above=0.)
         tolerance = gcmd.get_float('TOLERANCE', 0.030, above=0.)
-        retries = gcmd.get_int('RETRIES', 3, minval=0)
+        retries = gcmd.get_int('RETRIES', 3, minval=1)   # 0 = never compared
         z_fast = self._tap(fast, backoff, fast)
         gcmd.respond_info("%s fast tap: contact z=%.4f" % (tool.name, z_fast))
         prev = self._tap(slow, repeat_backoff, slow)

@@ -605,6 +605,12 @@ class XLPuppies:
         if bedlet is None:
             self.set_bed_target(target)
         else:
+            # one bedlet: the same checks as set_bed_target
+            if not self.modular_bed_booted:
+                raise self.gcode.error("Modular bed not running")
+            if target > self.bed_max_temp:
+                raise self.gcode.error("Bed target %.1f above %.0f"
+                                       % (target, self.bed_max_temp))
             temps = list(self.bed_targets)
             temps[bedlet] = min(max(target, 0.), BED_MAX_TEMP)
             self._write_targets(temps)

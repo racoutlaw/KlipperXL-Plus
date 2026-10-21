@@ -56,6 +56,19 @@ traffic on the shared bus - the more tools already running, the more often
 tools now leave the bus to the connecting tool for that half second. None
 showed in the test restarts after the change; start-up takes the same time.
 
+**Small fixes from a code review.**
+- `M140 B<n> S<temp>` (one bedlet) now refuses a target above the bed's
+  `max_temp` and refuses while the bed isn't running, the same checks the
+  whole-bed `M140` already had.
+- `SAVE_TOOL_Z_OFFSET TOOL=<n>` without `Z=` refuses when that tool isn't
+  the picked one: it read the picked tool's offset and saved it for the
+  other tool. Give `Z=` to set a parked tool.
+- A tool that doesn't report parked after a park gets its offset and
+  loadcell back - it is still on the carriage, and a later `T<n>` ran it
+  with neither.
+- `XL_PROBE_Z RETRIES=0` is refused (the minimum is 1); with 0 the probe
+  always failed.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section, the new grid page and the longer
 loadcell zeroing in each tool's file): power menu
