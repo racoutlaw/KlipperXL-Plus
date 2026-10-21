@@ -573,6 +573,38 @@ class BridgeEngine:
                 "serial_bridge: dwarf_index %d used twice"
                 % (channel.dwarf_index,))
         self.channels[channel.name] = channel
+        self._guard_clock_connect(channel)
+    def _guard_clock_connect(self, ch):
+        """Give a Dwarf the bus to itself while klippy takes its first
+        clock samples.  clocksync.connect() (clocksync.py:33-52, called
+        by mcu.py:876 right after identify) fits the frequency from
+        get_uptime + 8 get_clock 50 ms apart and keeps every one of them
+        (last_prediction_time = -9999), so a sample held up behind another
+        Dwarf's transaction goes straight into the estimate.  19 starts
+        10/17-10/21, a 5.4-8.8 ms late sample during connect: T0 0x, T1 2x,
+        T2 8x, T3 9x, T4 12x - more often the more Dwarfs are running.
+        10/21 07:28 it left dwarf_t4 at 55.29 MHz, which clocksync then
+        held for 11 s, ignoring the good samples as outliers (clocksync.py:
+        76): "configured for 56Mhz but running at 55Mhz".  The others wait
+        ~0.45 s with settled clocks (a late sample is ignored); the 10/04
+        starvation was the whole ~6 s bring-up per Dwarf."""
+        cs = getattr(ch.mcu_obj, '_clocksync', None)
+        connect = getattr(cs, 'connect', None)
+        if connect is None:
+            return
+        def guarded_connect(serial):
+            took = self._exclusive is None
+            if took:
+                self._exclusive = ch
+            try:
+                with self.bus_mutex:
+                    pass        # a transaction in flight finishes first
+                connect(serial)
+            finally:
+                if took and self._exclusive is ch:
+                    self._exclusive = None
+                    self.kick()
+        cs.connect = guarded_connect
     def unregister_channel(self, channel):
         self.channels.pop(channel.name, None)
     def get_bus_mutex(self):

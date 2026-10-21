@@ -47,6 +47,15 @@ the wait 0.007 mm. A 7x6 mesh takes about 24 s longer.
 (now called **Installer log**) is open when the page loads, so you can see
 the installer working from the first step.
 
+**Start-up clock check, last tool too.** The same warning could still show
+for the last tool to boot ("MCU 'dwarf_t4' configured for 56Mhz but running
+at 55Mhz"). Right after a tool connects, Klipper measures its clock from a
+few quick samples; one of them sometimes waited behind another tool's
+traffic on the shared bus - the more tools already running, the more often
+(last 19 start-ups: the first tool never, the last tool 12 times). The other
+tools now leave the bus to the connecting tool for that half second. None
+showed in the test restarts after the change; start-up takes the same time.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section, the new grid page and the longer
 loadcell zeroing in each tool's file): power menu
