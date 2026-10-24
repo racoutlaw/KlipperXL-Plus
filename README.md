@@ -186,7 +186,7 @@ Step by step, with pictures: **[docs/INSTALL.md](docs/INSTALL.md)**.
 | `PA_TUNE_T0` - `PA_TUNE_T4` | measure one tool's pressure advance, end to end |
 | `GET_TOOL_PA` / `SET_TOOL_PA TOOL= K=` / `SAVE_TOOL_PA TOOL= K=` | per-tool pressure advance |
 | `GET_TOOL_Z_OFFSETS` / `SET_TOOL_Z_OFFSET` / `SAVE_TOOL_Z_OFFSET` | per-tool Z fine-tune |
-| `FILAMENT_LOAD TOOL= TEMP=` / `FILAMENT_UNLOAD TOOL= TEMP=` | Prusa's M701 / M702 |
+| `FILAMENT_LOAD TOOL=` / `FILAMENT_UNLOAD TOOL=` | Prusa's M701 / M702: a load asks the filament type (PLA, PETG, ABS...) once the gears have it; an unload heats for the type that tool was loaded with |
 | `FILAMENT_SENSORS` | every tool's sensors |
 | `M600` / `M591 S0`, `M591 S1` | filament change / runout off, on |
 | `SET_AUTOLOAD` | autoload on / off |

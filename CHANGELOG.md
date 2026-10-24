@@ -69,9 +69,27 @@ showed in the test restarts after the change; start-up takes the same time.
 - `XL_PROBE_Z RETRIES=0` is refused (the minimum is 1); with 0 the probe
   always failed.
 
+**Load asks which filament.** As stock Prusa does, a load or autoload stops
+once the gears have the filament and asks its type in a pop-up (Mainsail and
+KlipperScreen): PLA 215, PETG 230, ASA 260, PC 275, PVB 215, ABS 255,
+HIPS 220, PP 240, FLEX 240, PA 285 C - stock's temperatures - or Cancel,
+which takes it back out of the gears. It heats to that, then loads and
+purges; a tool already heating keeps its temperature and is not asked. Each
+tool remembers its type and its unload heats for it; the Unload button on a
+tool whose type is not known asks the same question before anything moves.
+Before, everything loaded and unloaded at 215 C unless you typed a
+temperature - ABS went in at 215. The Load / Unload buttons have no TEMP box
+any more; `LOAD_FILAMENT` / `UNLOAD_FILAMENT TOOL=n TEMP=t` in the console
+still take one. FLEX stays in the nozzle after loading (stock: no pull-back
+for FLEX).
+
+**Load / Unload buttons no longer fall back to T0.** With no TOOL and no
+tool picked they refuse and ask for TOOL. Before, they used T0: a 4 typed
+into the TEMP box picked T0 and started heating it.
+
 **After this update** Mainsail asks you to finish it with the installer page
-(it adds the bed's `[heater_bed]` section, the new grid page and the longer
-loadcell zeroing in each tool's file): power menu
+(it adds the bed's `[heater_bed]` section, the new grid page, the longer
+loadcell zeroing in each tool's file and the new Load / Unload buttons): power menu
 (top right) → **Service Control** → **KlipperXL-Plus-installer** → start, then
 open `http://<your Pi>:8099`.
 
