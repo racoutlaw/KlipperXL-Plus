@@ -84,6 +84,9 @@ HOMING_MAX_ATTEMPTS = 10
 HOME_INVERT_DIFF = 1.0      # axis_home_invert_min/max_diff: -1 .. +1 mm
 HOMING_BACKOFF_POST_MM = 2.0
 TRAVEL_MOVE_MM_S = 400.0    # toolchanger_utils.h (SLOW_MOVE_MM_S 50 = SLOW_SPEED)
+# After the right edge bump the way back to the left frame is the whole X
+# width; less than this and the two hits were not the right edge
+ALIGN_MIN_WIDTH = 0.9 * (X_MAX_POS - X_MIN_POS)
 
 
 class XLToolchanger:
@@ -801,11 +804,26 @@ class XLToolchanger:
                                   HOMING_FEEDRATE_XY, must_trigger=False)
         toolhead.wait_moves()
         self._home_x_inverted(gcmd)          # "Bump right edge"
-        # current_position.x = X_MAX_POS; "Return to left edge before homing"
+        # "Return to left edge before homing": stock sets X = X_MAX_POS and
+        # travels to X 0 at 400 mm/s, trusting the bump.  Owner 10/24: the
+        # two hits once tripped near the front-left corner (0.613 mm apart,
+        # the carriage never went right) and that return drove into the left
+        # frame.  Here the return watches the X stall endstop at homing
+        # speed and measures the way to the left frame.
+        width = self._homing_move_rel(0, -1.5 * (X_MAX_POS - X_MIN_POS),
+                                      HOMING_FEEDRATE_XY, must_trigger=True)
+        logging.info("xl_toolchanger: right edge to left frame %.1f mm",
+                     width)
+        if width < ALIGN_MIN_WIDTH:
+            raise gcmd.error("Toolchanger lock alignment: the right edge hits"
+                             " were only %.0f mm from the left frame - not"
+                             " the right edge.  Check nothing blocks the"
+                             " carriage, then home again." % (width,))
+        # at the left frame (X_MIN_POS); on to X 0, where stock's return ends
         pos = toolhead.get_position()
-        pos[0] = X_MAX_POS
+        pos[0] = X_MIN_POS
         toolhead.set_position(pos, homing_axes="x")
-        toolhead.manual_move([0., None, None], TRAVEL_MOVE_MM_S)
+        toolhead.manual_move([0., None, None], HOMING_FEEDRATE_XY)
         toolhead.wait_moves()
     def _home_x_inverted(self, gcmd):
         """homeaxis(X_AXIS, 0, true): 3 mm away, hit the right edge at

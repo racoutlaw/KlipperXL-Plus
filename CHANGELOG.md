@@ -87,6 +87,15 @@ for FLEX).
 tool picked they refuse and ask for TOOL. Before, they used T0: a 4 typed
 into the TEMP box picked T0 and started heating it.
 
+**Tool lock alignment can't drive into the left frame.** Homing X and Y with
+no tool on bumps the right edge twice (as stock), then goes back to the
+left. Stock goes back at 400 mm/s, trusting the bump; once the two hits
+tripped near the front-left corner instead of at the edge, and that run
+drove the carriage into the left frame. The way back is now made at homing
+speed, stopping at the frame and measuring the width (378-379 mm in our
+tests); a short one stops with an error instead. A full home with no tool
+on takes about 6 s longer.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section, the new grid page, the longer
 loadcell zeroing in each tool's file and the new Load / Unload buttons): power menu
