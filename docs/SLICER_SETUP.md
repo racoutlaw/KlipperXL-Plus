@@ -43,14 +43,17 @@ START_PRINT EXTRUDER_TEMP=[nozzle_temperature_initial_layer] BED_TEMP=[bed_tempe
 ```
 
 What START_PRINT does with it: heats the bed for the print area only
-(`X0/Y0/X1/Y1`), homes XY, picks T0 and heats it to the probing temperature
-(150 C), homes Z with T0's loadcell, meshes only the print area (4-12 points per
-axis, ~30 mm apart), picks the print tool (`TOOL`), heats it to `EXTRUDER_TEMP`,
-gives back any melt-zone retract from the last print, and draws a prime line.
+(`X0/Y0/X1/Y1`), homes XY, picks the job's first tool (`TOOL`) and heats it to
+the probing temperature (150 C), homes Z with that tool's loadcell, meshes only
+the print area (4-12 points per axis, ~30 mm apart), heats the tool to
+`EXTRUDER_TEMP`, gives back any melt-zone retract from the last print, and draws
+a prime line. As stock, the first tool homes and meshes; every other tool rides
+on its calibrated tool offset from it.
 
 Optional parameter: `TOOLS=<n>` = how many tools the job uses. With `TOOLS=1`
-the job homes Z with its own printing tool instead of T0 (no tool offset involved).
-Without it, the multi-tool path is used (T0 homes Z), which works for every job.
+the job uses each tool's single-tool Z fine-tune (`z_adjust_single_tN`).
+Without it, the multi-tool fine-tune (`z_adjust_tN`) is used, which works for
+every job; the job's first tool still homes Z.
 
 ## What KlipperXL-Plus handles that the slicer sends during a print
 

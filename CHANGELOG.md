@@ -96,9 +96,28 @@ speed, stopping at the frame and measuring the width (378-379 mm in our
 tests); a short one stops with an error instead. A full home with no tool
 on takes about 6 s longer.
 
+**Every print homes Z with its first tool, as stock.** A multi-tool print
+now picks the tool it starts with, homes Z and meshes the bed with that
+tool's loadcell; the other tools ride on their calibrated offsets from it.
+Before, a multi-tool print always homed and meshed with T0, so a print that
+started on another tool laid its first layer through that tool's Z offset
+from T0. Single-tool prints already homed with their own tool. If you tuned
+a tool's multi-tool Z fine-tune on prints that started on that tool, check
+its first layer once.
+
+**Z fine-tune per filament type.** While a tool is loaded with a filament
+type (the load pop-up's choice), Mainsail's Z offset **Save** stores the
+fine-tune for that tool and that type (`z_adjust_t4_abs`, or
+`z_adjust_single_t4_abs` in a single-tool print), and it is used whenever
+the tool has that type loaded again; a type without its own value uses the
+tool's. The console says when a type's value is applied (`T4 Z fine-tune
+for ABS: +0.020`). `SET_TOOL_Z_OFFSET` / `SAVE_TOOL_Z_OFFSET` take
+`FILAMENT=` (`NONE` = the tool's own value); `GET_TOOL_Z_OFFSETS` lists them.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section, the new grid page, the longer
-loadcell zeroing in each tool's file and the new Load / Unload buttons): power menu
+loadcell zeroing in each tool's file, the new Load / Unload buttons and the
+first-tool homing in `START_PRINT`): power menu
 (top right) → **Service Control** → **KlipperXL-Plus-installer** → start, then
 open `http://<your Pi>:8099`.
 

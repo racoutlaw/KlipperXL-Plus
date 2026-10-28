@@ -453,8 +453,9 @@ to the ACTIVE tool); SAVE_CONFIG; repeat per tool.  Bounds -0.3..+0.5 mm.
 Slicer Z offset stays 0.
 KlipperXL-Plus has it (xl_toolchanger, released behaviour): Z_OFFSET_APPLY_PROBE
 (Mainsail/KlipperScreen Save), SAVE_TOOL_Z_OFFSET / SET_TOOL_Z_OFFSET /
-GET_TOOL_Z_OFFSETS; two slots per tool - z_adjust_tN (multi-tool, T0 datum)
-and z_adjust_single_tN (the tool homed itself).  Used by the owner 10/05
+GET_TOOL_Z_OFFSETS; two slots per tool - z_adjust_tN (multi-tool jobs) and
+z_adjust_single_tN (single-tool jobs).  Every job homes Z with its first tool
+(stock); until 10/24 multi-tool jobs homed with T0.  Used by the owner 10/05
 (saved in his printer.cfg).
 Owner decisions: 10/05 no built-in first-layer pattern ("slice your own", as
 released); 10/06 NO wizard at all - "first layer is just something you can do

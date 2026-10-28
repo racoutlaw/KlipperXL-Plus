@@ -19,18 +19,24 @@
 # puppy_bootloader.py l.7838-7871, 2389-2463): on pick
 #   SET_GCODE_OFFSET X=-ox Y=-oy Z=-(oz - datum_z) MOVE=0
 # (Prusa stores ref - tool; Klipper's offset shifts the other way), where
-# datum_z is the Z offset of the tool that homed Z (T0 -> 0; a single-tool
-# print homes with its own tool, so its own Z cancels).  Cleared on park,
+# datum_z is the Z offset of the tool that homed Z (a plain G28: T0 -> 0;
+# a print homes with its first tool, as stock, so that tool's own Z cancels
+# and the others ride on their offset from it).  Cleared on park,
 # re-applied when SET_Z_DATUM_TOOL records a new datum after G28 Z.
 # Plus the owner's first-layer fine-tune (released tool_offsets.py, autosave
-# [tool_offsets]): z_adjust_tN for multi-tool prints, z_adjust_single_tN when
-# this tool homed Z itself in a single-tool print (defaults to the multi
-# value); both clamped to -0.3 .. +0.5 mm.
+# [tool_offsets]): z_adjust_tN for multi-tool prints, z_adjust_single_tN for
+# this tool's single-tool prints (defaults to the multi
+# value); both clamped to -0.3 .. +0.5 mm.  Owner 10/24: also per filament
+# type - z_adjust[_single]_tN_<type> while the tool is loaded with that type
+# (the load pop-up's choice); the babystep save goes there, FILAMENT= picks
+# another slot (NONE = the tool's own).
+#   SET_TOOL_Z_OFFSET TOOL=n Z= [SINGLE=] [FILAMENT=]
+#   SAVE_TOOL_Z_OFFSET [TOOL=n] [Z=] [SINGLE=] [FILAMENT=]   GET_TOOL_Z_OFFSETS
 #
 # Copyright (C) 2026  Richard Crook
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math
+import logging, math, re
 from . import homing
 
 # Prusa toolchanger_utils.h (via released KlipperXL)
@@ -55,6 +61,8 @@ SAFE_Z = 20.0
 SENSOR_SETTLE = 0.3                       # s, released pause before reading
 NUM_TOOLS = 5
 Z_ADJUST_MIN, Z_ADJUST_MAX = -0.3, 0.5   # released tool_offsets.py z_min/z_max
+# per filament type (owner 10/24): z_adjust_tN_abs / z_adjust_single_tN_abs
+Z_ADJUST_TYPE_RE = re.compile(r'^z_adjust_(single_)?t(\d+)_([a-z0-9]+)$')
 # fresh-install seed (kxlplus_config.py PA_SEED, released [extruder] value)
 PA_STARTING_VALUE = 0.025
 PA_MIN, PA_MAX = 0., 1.0                  # released tool_pa.py k_min/k_max
@@ -113,6 +121,11 @@ class XLToolchanger:
             self.z_adjust_single[t] = config.getfloat(
                 'z_adjust_single_t%d' % (t,), multi,
                 minval=Z_ADJUST_MIN, maxval=Z_ADJUST_MAX)
+        # Owner 10/24: a fine-tune per filament type too - used while the tool
+        # is loaded with that type (xl_filament's filament_tN, picked in the
+        # load pop-up); a type without one uses the tool's own value above.
+        # Every such key is read here, or Klipper refuses it as unknown.
+        self._read_z_adjust_types(config)
         # optional filament label per tool's pressure advance (released
         # tool_pa.py t<N>_label); [extruderN] cannot hold it
         self.pa_label = {t: config.get('pa_label_t%d' % (t,), '')
@@ -444,16 +457,22 @@ class XLToolchanger:
     def _apply_offset(self, tool, from_timer=False):
         ox, oy, oz = self.offsets[tool]
         datum_z = self.offsets[self.z_home_tool][2]
-        if self.single_mode and tool == self.z_home_tool:
-            adj = self.z_adjust_single[tool]
-        else:
-            adj = self.z_adjust[tool]
+        ftype = self._loaded_type(tool)
+        adj, by_type = self._z_adjust_for(tool, self._single_slot(tool), ftype)
         script = ("SET_GCODE_OFFSET X=%.4f Y=%.4f Z=%.4f MOVE=0"
                   % (-ox, -oy, -(oz - datum_z) + adj))
         if from_timer:
             self.gcode.run_script(script)     # not inside a g-code command
         else:
             self._run(script)
+        if by_type:
+            self.gcode.respond_info("T%d Z fine-tune for %s: %+.3f"
+                                    % (tool, ftype, adj))
+    def filament_changed(self, tool):
+        # xl_filament: a load / unload changed this tool's filament type -
+        # the picked tool takes that type's Z fine-tune now
+        if tool == self.active_tool:
+            self._apply_offset(tool)
     # each tool is a Klipper extruder: T0 'extruder', Tn 'extruderN'
     def _activate_extruder(self, tool, from_timer=False):
         name = 'extruder' if tool == 0 else 'extruder%d' % (tool,)
@@ -468,9 +487,62 @@ class XLToolchanger:
     def _single_slot(self, tool):
         # the single-tool slot applies exactly when _apply_offset uses it
         return self.single_mode and tool == self.z_home_tool
-    def _set_z_adjust(self, tool, value, single):
+    def _read_z_adjust_types(self, config):
+        self.z_adjust_type = {}          # (tool, 'ABS') -> multi
+        self.z_adjust_single_type = {}   # (tool, 'ABS') -> single
+        for opt in config.get_prefix_options('z_adjust_'):
+            m = Z_ADJUST_TYPE_RE.match(opt)
+            if m is None:
+                continue
+            value = config.getfloat(opt, minval=Z_ADJUST_MIN,
+                                    maxval=Z_ADJUST_MAX)
+            t = int(m.group(2))
+            if t < NUM_TOOLS:
+                table = (self.z_adjust_single_type if m.group(1)
+                         else self.z_adjust_type)
+                table[(t, m.group(3).upper())] = value
+    def _loaded_type(self, tool):
+        # the filament type the last load put in this tool (xl_filament's
+        # filament_tN in save_variables), '' when not known
+        sv = self.printer.lookup_object('save_variables', None)
+        f = (sv.allVariables.get('filament_t%d' % (tool,))
+             if sv is not None else None)
+        if not isinstance(f, dict):
+            return ''
+        return str(f.get('type', '')).upper()
+    def _z_adjust_for(self, tool, single, ftype):
+        """(value, True when it is the filament type's own).  Single falls
+        back to multi within a type, as z_adjust_single_tN does."""
+        if ftype:
+            if single and (tool, ftype) in self.z_adjust_single_type:
+                return self.z_adjust_single_type[(tool, ftype)], True
+            if (tool, ftype) in self.z_adjust_type:
+                return self.z_adjust_type[(tool, ftype)], True
+        return (self.z_adjust_single[tool] if single
+                else self.z_adjust[tool]), False
+    def _z_type_param(self, gcmd, tool):
+        # FILAMENT=ABS sets that type's slot, FILAMENT=NONE the tool's own;
+        # default: the type loaded in the tool
+        ftype = gcmd.get('FILAMENT', None)
+        if ftype is None:
+            return self._loaded_type(tool)
+        ftype = ftype.strip().upper()
+        if ftype in ('', 'NONE'):
+            return ''
+        if not re.match(r'^[A-Z0-9]+$', ftype):
+            raise gcmd.error("FILAMENT must be a type name (PLA, PETG, ABS"
+                             " ...) or NONE")
+        return ftype
+    def _set_z_adjust(self, tool, value, single, ftype=''):
         value = max(Z_ADJUST_MIN, min(Z_ADJUST_MAX, value))
-        if single:
+        if ftype:
+            old = self._z_adjust_for(tool, single, ftype)[0]
+            table = (self.z_adjust_single_type if single
+                     else self.z_adjust_type)
+            table[(tool, ftype)] = value
+            key = 'z_adjust_%st%d_%s' % ('single_' if single else '', tool,
+                                         ftype.lower())
+        elif single:
             old, self.z_adjust_single[tool] = self.z_adjust_single[tool], value
             key = 'z_adjust_single_t%d' % (tool,)
         else:
@@ -491,7 +563,8 @@ class XLToolchanger:
         oz = self.offsets[tool][2]
         datum_z = self.offsets[self.z_home_tool][2]
         key, old, new = self._set_z_adjust(tool, total + (oz - datum_z),
-                                           self._single_slot(tool))
+                                           self._single_slot(tool),
+                                           self._loaded_type(tool))
         self._stage(key, new)
         gcmd.respond_info("T%d %s: %.4f (was %.4f)\nThe SAVE_CONFIG command"
                           " will update the printer config file and restart"
@@ -520,23 +593,35 @@ class XLToolchanger:
             total = self.printer.lookup_object('gcode_move').homing_position[2]
             z = total + (self.offsets[tool][2]
                          - self.offsets[self.z_home_tool][2])
-        key, old, new = self._set_z_adjust(tool, z, single)
+        key, old, new = self._set_z_adjust(tool, z, single,
+                                           self._z_type_param(gcmd, tool))
         self._stage(key, new)
         gcmd.respond_info("T%d %s: %.4f (was %.4f)\nRun SAVE_CONFIG to"
                           " persist." % (tool, key, new, old))
     def cmd_SET_TOOL_Z_OFFSET(self, gcmd):
         tool = gcmd.get_int('TOOL', minval=0, maxval=NUM_TOOLS - 1)
         single = bool(gcmd.get_int('SINGLE', int(self._single_slot(tool))))
-        key, old, new = self._set_z_adjust(tool, gcmd.get_float('Z'), single)
+        key, old, new = self._set_z_adjust(tool, gcmd.get_float('Z'), single,
+                                           self._z_type_param(gcmd, tool))
         gcmd.respond_info("T%d %s: %.4f (was %.4f) - not saved"
                           " (SAVE_TOOL_Z_OFFSET to persist)"
                           % (tool, key, new, old))
     def cmd_GET_TOOL_Z_OFFSETS(self, gcmd):
         lines = ["Per-tool Z fine-tune      multi    single",
-                 "                       (T0 datum) (self-homed)"]
+                 "                       (2+ tools)  (1 tool)"]
         for t in self._installed():
-            lines.append("  T%d:              %8.4f  %8.4f"
-                         % (t, self.z_adjust[t], self.z_adjust_single[t]))
+            ftype = self._loaded_type(t)
+            lines.append("  T%d:              %8.4f  %8.4f   loaded: %s"
+                         % (t, self.z_adjust[t], self.z_adjust_single[t],
+                            ftype or "not known"))
+            for (tt, ft) in sorted(set(self.z_adjust_type)
+                                   | set(self.z_adjust_single_type)):
+                if tt != t:
+                    continue
+                lines.append("    %-6s           %8.4f  %8.4f%s"
+                             % (ft, self._z_adjust_for(t, False, ft)[0],
+                                self._z_adjust_for(t, True, ft)[0],
+                                "   <- in use" if ft == ftype else ""))
         lines.append("Active mode: %s (Z datum T%d)"
                      % ("SINGLE-TOOL" if self.single_mode else "MULTI-TOOL",
                         self.z_home_tool))

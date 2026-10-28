@@ -38,15 +38,15 @@ the way stock Prusa firmware does them.
 - **Multi-color printing** with a wipe tower, and **spool join**: after a
   runout, carry on with another tool loaded with the same filament
 - **Loadcell Z homing and bed mesh** with every tool's own loadcell; adaptive
-  mesh (only the print area); a single-tool print homes Z with the tool that
-  prints
+  mesh (only the print area); a print homes Z with its first tool, as stock
 - **Modular bed**: 16 zones, heats only under the print with Prusa's gradient
   on the zones around it; `BED_STATUS`, `SET_BED_AREA`; the **bedlet grid**
   panel - the 16 zone temperatures live in Mainsail
 - **Automatic per-tool pressure advance**, measured with each tool's loadcell
   (CNC Kitchen's method) - about 6 minutes per tool, no test prints
 - **Input shaper**, **Z alignment** of the two Z motors (`PRUSA_Z_LEVEL`),
-  **per-tool Z fine-tune** with Mainsail's own Z offset buttons
+  **per-tool Z fine-tune** with Mainsail's own Z offset buttons, per
+  filament type too
 - **Filament**: autoload, side + tool sensors, runout pause, Load / Unload
   buttons (`FILAMENT_LOAD` / `FILAMENT_UNLOAD`)
 - **Print fan follows the tool**; every tool heats on its own (`M104 T<n>`)
@@ -210,9 +210,17 @@ offsets from the pin:
 3. **SAVE_CONFIG** writes it to `printer.cfg`.
 
 A multi-tool print and a single-tool print each have their own value per
-tool (`z_adjust_tN` / `z_adjust_single_tN` in `[xl_toolchanger]`), because
-Z is homed with T0 in one and with the printing tool in the other. Range
--0.3 to +0.5 mm. **Leave the Z offset at 0 in the slicer.**
+tool (`z_adjust_tN` / `z_adjust_single_tN` in `[xl_toolchanger]`): every
+print homes Z with its first tool, as stock, so in a single-tool print the
+tool measured the bed itself, and in a multi-tool print the other tools ride
+on their offsets from the first one. Range -0.3 to +0.5 mm. **Leave the Z
+offset at 0 in the slicer.**
+
+**Per filament type too:** while a tool is loaded with a type (the load
+pop-up's choice), **Save** stores the value for that tool and that type
+(`z_adjust_t4_abs`, `z_adjust_single_t4_abs`), and it is used whenever the
+tool has that type loaded; a type with no value of its own uses the tool's.
+`GET_TOOL_Z_OFFSETS` lists them all.
 
 ## Per-tool pressure advance
 

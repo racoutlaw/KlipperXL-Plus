@@ -271,6 +271,10 @@ class XLFilament:
         sv.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
             "SAVE_VARIABLE", "SAVE_VARIABLE",
             {"VARIABLE": 'filament_t%d' % (tool,), "VALUE": repr(value)}))
+        # the picked tool's Z fine-tune follows its filament type
+        tc = self.printer.lookup_object('xl_toolchanger', None)
+        if tc is not None:
+            tc.filament_changed(tool)
     def _e_move(self, mm, speed, accel=E_ACCEL):
         toolhead = self.printer.lookup_object('toolhead')
         extruder = toolhead.get_extruder()
