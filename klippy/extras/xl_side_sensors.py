@@ -58,7 +58,6 @@ MEDIAN_SAMPLES = 3     # Prusa MedianFilter fs_raw_buffer_size (median of 3)
 ADC_MIN = 20           # below = sensor not connected (released KlipperXL)
 ADC_MAX = 4096         # released FS_ADC_MAX
 CAL_MIN_DIFF = 200     # released SIDE_FS_CAL_MIN_DIFF
-BACKGROUND_PRIORITY_CLOCK = 0x7fffffff00000000
 
 
 class XLSideSensors:
@@ -83,7 +82,11 @@ class XLSideSensors:
         ppins.lookup_pin(MUX_A_PIN)
         ppins.lookup_pin(MUX_B_PIN)
         self.mux_oids = [self.mcu.create_oid(), self.mcu.create_oid()]
-        self.mux_level = [0, 0]
+        # Unknown until the first step sends both: a Klipper restart that
+        # keeps the XLBuddy configured keeps the last session's mux pins
+        # (printer 10/28: T0 / T4 first read T1's / T3's values; left on
+        # position 2 or 3 that is the 10/05 first reading 3713-4094)
+        self.mux_level = [None, None]
         self.mux_cmd = None
         self.mcu.register_config_callback(self._build_config)
         self._lock = threading.Lock()
@@ -116,6 +119,8 @@ class XLSideSensors:
         cq = self.mcu.alloc_command_queue()
         self.mux_cmd = self.mcu.lookup_command(
             "update_digital_out oid=%c value=%c", cq=cq)
+        self.mux_done = self.mcu.lookup_query_command(
+            "get_uptime", "uptime high=%u clock=%u", cq=cq)
     # ADC samples arrive on the serial thread
     def _adc_callback(self, ch, samples):
         with self._lock:
@@ -132,13 +137,23 @@ class XLSideSensors:
     def _shutdown(self):
         self._shut = True
         self.reactor.update_timer(self._timer, self.reactor.NEVER)
+    # When the switch really ran, not when it was sent: the XLBuddy answers
+    # get_uptime on the same queue only after the switch, and its clock in
+    # the answer is from after it - readings taken from then on are the new
+    # position's.  Taking the send time as the switch time filed the old
+    # position's reading under the new one whenever the XLBuddy had other
+    # work queued (printer 10/28: behind the screen's drawing T3 / T4 read
+    # ~3790 - Y at position 2, Prusa's "sandwich" input, measured 3754 there
+    # idle; position 3 reads 4094 - and a loaded T4 autoloaded; the same as
+    # the 10/05 first readings of 3713-4094 at Klipper start).  Idle test:
+    # PF6 steady 933-941 while a full page was drawn, so not electrical.
     def _set_mux(self, pos, eventtime):
         for i, level in enumerate((pos & 1, (pos >> 1) & 1)):
             if self.mux_level[i] != level:
-                self.mux_cmd.send([self.mux_oids[i], level],
-                                  reqclock=BACKGROUND_PRIORITY_CLOCK)
+                self.mux_cmd.send([self.mux_oids[i], level])
                 self.mux_level[i] = level
-        self._switch_time = self.mcu.estimated_print_time(eventtime)
+        clock = self.mcu.clock32_to_clock64(self.mux_done.send()['clock'])
+        self._switch_time = self.mcu.clock_to_print_time(clock)
     def _step(self, eventtime):
         if self._shut:
             return self.reactor.NEVER
