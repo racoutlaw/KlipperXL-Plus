@@ -183,7 +183,25 @@ KLIPPER_WAS_ACTIVE=0
 systemctl is-active --quiet klipper && KLIPPER_WAS_ACTIVE=1
 stop_klipper() { [ "$KLIPPER_WAS_ACTIVE" = "1" ] && sudo systemctl stop klipper || true; }
 start_klipper() { sudo systemctl start klipper; }
+# owner 10/27: never on a Prusa XL+.  Stock firmware shows the printer model
+# on USB: Prusa vendor 2c99, product 41 (0x0029) = XL+, 17 = XL (Prusa 6.10.3
+# include/common/printer_model_data.hpp usb_pid, src/buddy/usb_device.cpp:213).
+# Read from sysfs only - nothing is sent to the printer.
+xl_plus_on_usb() {
+    for d in /sys/bus/usb/devices/*; do
+        [ "$(cat "$d/idVendor" 2>/dev/null)" = "2c99" ] \
+            && [ "$(cat "$d/idProduct" 2>/dev/null)" = "0029" ] && return 0
+    done
+    return 1
+}
 usb_stick_step() {
+    if xl_plus_on_usb; then
+        echo "ERROR: this printer is a Prusa XL+ (its stock firmware says so on"
+        echo "  USB). KlipperXL-Plus is for the original Prusa XL only - nothing"
+        echo "  was flashed and no USB stick was made."
+        [ "$KLIPPER_WAS_ACTIVE" = "1" ] && start_klipper
+        exit 1
+    fi
     mark STEP xlbuddy
     echo
     echo "=== Stage 1 done. Next: put KlipperXL-Plus firmware on the XLBuddy ==="
@@ -254,6 +272,13 @@ fi
 if echo "$SCAN" | grep -q "NOT_KXLPLUS_FW"; then
     echo "  the XLBuddy runs other Klipper firmware (not KlipperXL-Plus)."
     usb_stick_step
+fi
+# owner 10/27: never on a Prusa XL+ (xl_flash_dwarf.py is_xl_plus)
+if echo "$SCAN" | grep -q "XL_PLUS"; then
+    echo "ERROR: this printer is a Prusa XL+. KlipperXL-Plus is for the original"
+    echo "  Prusa XL only - no tool was flashed. Put stock Prusa firmware back on"
+    echo "  the XLBuddy (Prusa's .bbf from a USB stick)."
+    start_klipper; exit 1
 fi
 XL_FW=$(echo "$SCAN" | sed -n 's/^XLBUDDY_FW: //p')
 if [ -n "$NEW_XL" ] && [ -n "$XL_FW" ] && [ "$XL_FW" != "$NEW_XL" ]; then

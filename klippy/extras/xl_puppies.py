@@ -30,6 +30,12 @@ BL_COMPUTE_FINGERPRINT = 0x0F
 ADDR_DEFAULT = 0x00
 ADDR_FIRST_BOOT = 0x0A          # bed 0x0A, Dwarf N 0x0A+N
 ADDR_MODULAR_BED = 0x1A
+ADDR_XL_CAN_BOOT = 0x13         # Prusa XL+ only: its XL-CAN board's bootloader
+
+XL_PLUS_MSG = ("This printer is a Prusa XL+ (its XL-CAN board answered on the"
+               " bus). KlipperXL-Plus is for the original Prusa XL only, so it"
+               " started neither the bed nor the tools. Put stock Prusa"
+               " firmware back on the XLBuddy.")
 
 # Reset lines (PCA9557 via xl_reset_lines; HIGH = held, FACTS.md section 5)
 ALL_DWARF_BITS = 0x3E
@@ -260,6 +266,7 @@ class XLPuppies:
                                              minval=0.2, maxval=10.)
         self.reset_value = None       # unknown until first write
         self.running_dwarfs = 0       # reset-line bits of Dwarfs we started
+        self.xl_plus = None           # unknown until the first bed boot
         self.modular_bed_booted = False
         self.bed_measured = {}
         self.bed_targets = [0.] * NUM_BEDLETS
@@ -367,6 +374,31 @@ class XLPuppies:
             self._pause(0.1)
         logging.warning("xl_puppies: %s: START_APPLICATION refused", what)
         return False
+    def _is_xl_plus(self, hold):
+        """Owner 10/27: KlipperXL-Plus must not run on a Prusa XL+.  Prusa's
+        own check (6.10.3 src/puppies/xl_can_bootstrap.cpp xl_can_probe,
+        out_of_band_bootstrap.cpp:150-163): on an XL+ the bed reset line
+        resets the XL-CAN board on a HIGH->LOW edge; hold it HIGH 100 ms,
+        then up to 3x {LOW, HIGH, 50 ms, GET_PROTOCOL_VERSION at 0x13}.
+        On a plain XL nothing answers at 0x13 and the pulse only lets the
+        held bed go for a moment.  Asked once per Klipper start."""
+        if self.xl_plus is None:
+            self._resets(hold | BED_BIT)
+            self._pause(0.1)
+            self.xl_plus = False
+            for attempt in range(3):
+                self._resets(hold)
+                self._resets(hold | BED_BIT)
+                self._pause(0.05)
+                status, rx = self.bus.transact(build_frame(
+                    ADDR_XL_CAN_BOOT, BL_GET_PROTOCOL_VERSION))
+                if (status == FRAME_OK and len(rx) >= 5
+                        and rx[0] == ADDR_XL_CAN_BOOT and rx[1] == 0):
+                    self.xl_plus = True
+                    break
+            logging.info("xl_puppies: XL-CAN board %s", "found - Prusa XL+"
+                         if self.xl_plus else "not found (original XL)")
+        return self.xl_plus
     def boot_bed_for_bridge(self, attempts=3):
         """Boot the modular bed first (Prusa order).  Dwarfs that are not
         running are held; a running Dwarf is never reset (printer
@@ -376,6 +408,9 @@ class XLPuppies:
         if self.modular_bed_booted:
             return True
         hold = ALL_DWARF_BITS & ~self.running_dwarfs
+        if self._is_xl_plus(hold):
+            self.printer.invoke_shutdown(XL_PLUS_MSG)
+            return False
         for attempt in range(attempts):
             self._resets(hold | BED_BIT)
             self._pause(0.05)
@@ -395,6 +430,8 @@ class XLPuppies:
         Dwarf is held except those in keep_running (already running and
         locked to 0x8N - never reset them); the bed is never reset once
         it runs."""
+        if self.xl_plus:
+            return False
         bed = 0 if self.modular_bed_booted else BED_BIT
         hold = (ALL_DWARF_BITS | bed) & ~keep_running
         self._resets(hold)

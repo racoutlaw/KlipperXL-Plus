@@ -4,6 +4,11 @@
 
 # KlipperXL-Plus
 
+> ⚠️ **For the original Prusa XL only - not for the Prusa XL+.** The "Plus"
+> means Klipper on the tools too; it has nothing to do with Prusa's XL+
+> upgrade. On an XL+ (it has an XL-CAN board under the bed) the installer and
+> Klipper stop with a message before any tool is flashed or started.
+
 **Klipper on every tool of the Prusa XL.** The XLBuddy board runs Klipper as
 the bridge to the tools, **every tool (1-5) runs Klipper itself**, and the
 modular bed keeps its stock Prusa firmware. It installs from a ready-made SD

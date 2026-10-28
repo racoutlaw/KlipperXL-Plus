@@ -38,6 +38,9 @@ import reactor, serialhdl   # noqa: E402
 
 XLBUDDY_GLOB = '/dev/serial/by-id/usb-Klipper_stm32f407xx_*'
 HOLD_ALL = 0xBE                 # xlplus_resets.c: Dwarfs 1-5 + bed held
+BED_BIT = 0x80
+ADDR_XL_CAN_BOOT = 0x13         # Prusa XL+ only: its XL-CAN board's bootloader
+ADDR_BED_BOOT = 0x0A            # modular bed bootloader (Dwarf N = 0x0A+N)
 BL_GET_PROTOCOL_VERSION, BL_SET_ADDRESS, BL_GET_HARDWARE_INFO = 0x00, 0x01, 0x03
 BL_WRITE_FLASH, BL_FINALIZE_FLASH, BL_READ_FLASH = 0x06, 0x07, 0x08
 DWARF_HW_TYPE = 42
@@ -242,6 +245,37 @@ def scan_tools(xl):
         xl.resets(HOLD_ALL)
     return found
 
+def is_xl_plus(xl):
+    """Owner 10/27: nothing is flashed on a Prusa XL+.  Prusa's own check,
+    as xl_puppies._is_xl_plus (6.10.3 src/puppies/xl_can_bootstrap.cpp
+    xl_can_probe): the bed reset line resets the XL+'s XL-CAN board on a
+    HIGH->LOW edge; hold it HIGH 100 ms, then up to 3x {LOW, HIGH, 50 ms,
+    GET_PROTOCOL_VERSION at 0x13}.  A plain XL has nothing at 0x13."""
+    xl.resets(HOLD_ALL)
+    xl.r.pause(xl.r.monotonic() + 0.1)
+    for attempt in range(3):
+        xl.resets(HOLD_ALL & ~BED_BIT)
+        xl.resets(HOLD_ALL)
+        xl.r.pause(xl.r.monotonic() + 0.05)
+        status, rx = xl.transact(frame(ADDR_XL_CAN_BOOT,
+                                       BL_GET_PROTOCOL_VERSION), boot=False)
+        if (status == FRAME_OK and len(rx) >= 5
+                and rx[0] == ADDR_XL_CAN_BOOT and rx[1] == 0):
+            return True
+    # Plain XL: the pulses above restart the bed into its bootloader at the
+    # default address, where it would also take the first Dwarf's address
+    # (printer 10/28: T0's hardware info came back mixed with the bed's
+    # hw_type 43).  As Prusa (bed line LOW after an absent probe, then the
+    # bed is addressed first) and xl_puppies.boot_bed_for_bridge: give the
+    # bed its own address before any Dwarf gets one.
+    xl.resets(HOLD_ALL & ~BED_BIT)
+    xl.r.pause(xl.r.monotonic() + 0.5)         # bootloader start
+    xl.transact(frame(0x00, BL_SET_ADDRESS, [ADDR_BED_BOOT, 0]),
+                boot=False)                    # no reply expected
+    xl.r.pause(xl.r.monotonic() + 0.05)
+    xl.resets(HOLD_ALL)
+    return False
+
 def find_xlbuddy():
     ports = sorted(glob.glob(XLBUDDY_GLOB))
     if len(ports) != 1:
@@ -281,6 +315,10 @@ def main():
         try:
             xl.connect()
             print("XLBUDDY_FW: %s" % (xl.fw_id or "none",))
+            if is_xl_plus(xl):
+                raise FlashError("XL_PLUS: this printer is a Prusa XL+ (its"
+                                 " XL-CAN board answered) - nothing was"
+                                 " flashed")
             if args.scan:
                 found = scan_tools(xl)
                 print("TOOLS: %s" % (" ".join(str(t) for t in found),))

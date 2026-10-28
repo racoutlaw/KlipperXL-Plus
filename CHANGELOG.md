@@ -124,6 +124,13 @@ right within 0.3 s gets the same wiggle as before. A tool change takes about
 2.6 s less (10.5 s -> 7.8 s on average in our tests); the moves themselves
 (positions, speeds, motor currents) and every sensor check are unchanged.
 
+**Not for the Prusa XL+.** KlipperXL-Plus is for the original Prusa XL. At
+each start Klipper now asks for the XL-CAN board that only an XL+ has (the
+same check stock Prusa firmware makes), and so do the installer and the tool
+flasher before they flash anything. On an XL+ Klipper stops with a message
+and nothing is flashed. On an original XL nothing changes; start-up takes
+about half a second longer.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section, the new grid page, the longer
 loadcell zeroing in each tool's file, the new Load / Unload buttons and the
