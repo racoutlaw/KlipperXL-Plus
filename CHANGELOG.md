@@ -114,6 +114,13 @@ tool's. The console says when a type's value is applied (`T4 Z fine-tune
 for ABS: +0.020`). `SET_TOOL_Z_OFFSET` / `SAVE_TOOL_Z_OFFSET` take
 `FILAMENT=` (`NONE` = the tool's own value); `GET_TOOL_Z_OFFSETS` lists them.
 
+**Faster tool changes.** Pick and park now run their moves back to back and
+stop only where stock Prusa firmware stops: in front of the dock, after the
+lock moves and where a dock sensor is read. Before, the head stopped after
+every move - 13 times per tool change, now 6. A tool change takes about 2 s
+less (10.5 s -> 8.4 s on average in our tests); the moves themselves
+(positions, speeds, motor currents) and every sensor check are unchanged.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section, the new grid page, the longer
 loadcell zeroing in each tool's file, the new Load / Unload buttons and the

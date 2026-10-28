@@ -421,10 +421,17 @@ class XLToolchanger:
         return self.printer.lookup_object('xl_dock_sensors T%d' % (tool,))
     def _run(self, script):
         self.gcode.run_script_from_command(script)
-    def _move(self, x=None, y=None, speed=TRAVEL_SPEED):
+    # Pick / park queue their moves back to back (stock move() =
+    # line_to_current_position) and stop only where stock does
+    # (planner.synchronize: before a sensor read, before a current change,
+    # the pause in front of the dock).  Each stop costs Klipper's restart
+    # (BUFFER_TIME_START 0.25 s) - one after every move was ~4 s a change.
+    def _queue(self, x=None, y=None, speed=TRAVEL_SPEED):
         axes = "".join(" %s%.3f" % (a, v) for a, v in (("X", x), ("Y", y))
                        if v is not None)
         self._run("G90\nG1%s F%d" % (axes, speed * 60.))
+    def _move(self, x=None, y=None, speed=TRAVEL_SPEED):
+        self._queue(x, y, speed)
         self.printer.lookup_object('toolhead').wait_moves()
     def _xy_current(self, amps):
         self._run("SET_TMC_CURRENT STEPPER=stepper_x CURRENT=%.3f\n"
@@ -730,27 +737,28 @@ class XLToolchanger:
         if not dock.is_parked():
             dock.set_active(False)
             raise gcmd.error(self._not_docked_msg(tool))
-        self._move(x=dock_x, y=SAFE_Y_WITHOUT_TOOL)
-        self._move(y=dock_y + PICK_Y_OFFSET)
-        self._move(y=dock_y, speed=SLOW_SPEED)
+        self._queue(x=dock_x, y=SAFE_Y_WITHOUT_TOOL)
+        self._queue(y=dock_y + PICK_Y_OFFSET)
+        self._move(y=dock_y, speed=SLOW_SPEED)      # stop: sensor read
         self._settle()
         if not dock.is_picked():
             gcmd.respond_info("Not picked, wiggling...")
-            self._move(y=dock_y + DOCK_WIGGLE, speed=SLOW_SPEED)
+            self._queue(y=dock_y + DOCK_WIGGLE, speed=SLOW_SPEED)
             self._move(y=dock_y, speed=SLOW_SPEED)
             self._settle()
             if not dock.is_picked():
                 raise gcmd.error("T%d not detected as picked after wiggle!"
                                  % (tool,))
         self._xy_current(PARKING_CURRENT)
-        for off in PICK_X_OFFSETS:
-            self._move(x=dock_x + off, speed=SLOW_SPEED)
+        for off in PICK_X_OFFSETS[:-1]:
+            self._queue(x=dock_x + off, speed=SLOW_SPEED)
+        self._move(x=dock_x + PICK_X_OFFSETS[-1], speed=SLOW_SPEED)  # stop
         self._xy_current(NORMAL_CURRENT)
         self._settle()
         if dock.is_parked():
             gcmd.respond_info("WARNING: T%d still reporting parked after lock!"
                               % (tool,))
-        self._move(y=SAFE_Y_WITH_TOOL)
+        self._queue(y=SAFE_Y_WITH_TOOL)    # tool out - no stop (stock)
         self.active_tool = tool
         self._select_loadcell(tool)
         self._activate_extruder(tool)
@@ -783,17 +791,19 @@ class XLToolchanger:
         self._safe_z()
         gcmd.respond_info("Parking T%d at dock X=%.1f Y=%.1f"
                           % (tool, dock_x, dock_y))
-        self._move(x=dock_x + PARK_X_OFFSET_1, y=SAFE_Y_WITH_TOOL)
+        self._queue(x=dock_x + PARK_X_OFFSET_1, y=SAFE_Y_WITH_TOOL)
+        # stop in front of the dock: stock's pause "which allow the resonance
+        # in the tool to be damped before insertion" (toolchanger.cpp l.655)
         self._move(y=dock_y)
         self._xy_current(PARKING_CURRENT)
-        self._move(x=dock_x + PARK_X_OFFSET_2, speed=SLOW_SPEED)
-        self._move(x=dock_x + PARK_X_OFFSET_3, speed=SLOW_SPEED)
+        self._queue(x=dock_x + PARK_X_OFFSET_2, speed=SLOW_SPEED)
+        self._move(x=dock_x + PARK_X_OFFSET_3, speed=SLOW_SPEED)   # stop
         self._xy_current(NORMAL_CURRENT)
-        self._move(x=dock_x, y=dock_y, speed=SLOW_SPEED)
+        self._move(x=dock_x, y=dock_y, speed=SLOW_SPEED)   # stop: sensor read
         self._settle()
         if not dock.is_parked():
             gcmd.respond_info("Not parked, wiggling...")
-            self._move(x=dock_x - DOCK_WIGGLE, speed=SLOW_SPEED)
+            self._queue(x=dock_x - DOCK_WIGGLE, speed=SLOW_SPEED)
             self._move(x=dock_x, speed=SLOW_SPEED)
             self._settle()
             if not dock.is_parked():
@@ -808,6 +818,7 @@ class XLToolchanger:
         self._fan_set(tool, 0., fatal=False)   # toolchanger.cpp:348
         self._light_apply(tool)          # nozzle light: docked brightness
         self._status_now(tool)           # status LED: docked
+        # stop: the reading below must be taken with the carriage gone
         self._move(y=SAFE_Y_WITHOUT_TOOL)
         # Slow reports only once a reading taken AFTER the carriage left the
         # dock is in: until then 'picked' still shows the carriage.  Owner
