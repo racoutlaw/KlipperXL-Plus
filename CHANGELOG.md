@@ -131,6 +131,15 @@ flasher before they flash anything. On an XL+ Klipper stops with a message
 and nothing is flashed. On an original XL nothing changes; start-up takes
 about half a second longer.
 
+**Side filament sensors: no more false autoload.** The side sensors are read
+in turn through a switch, and a reading could be filed under the wrong tool:
+the scan took the moment it sent the switch as the moment it happened, and
+after a Klipper restart it assumed the switch was in its first position.
+When the XLBuddy was busy, or right after a restart, a loaded T3 or T4 could
+briefly read "empty" and then "inserted" - and autoload ran on a tool that
+was already loaded. Now the XLBuddy reports when the switch really happened,
+and the first step sets the switch fully.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section, the new grid page, the longer
 loadcell zeroing in each tool's file, the new Load / Unload buttons and the
