@@ -165,6 +165,21 @@ class XLDockSensors:
                 return True
             self.reactor.pause(self.reactor.monotonic() + 0.020)
         return False
+    def wait_until(self, cond, timeout):
+        """Stock wait(condition, WAIT_TIME_TOOL_PARKED_PICKED): True as soon
+        as a reading taken after now makes cond() true, False at the timeout
+        (toolchanger_utils.cpp l.528 - returns the instant it reads right)."""
+        mcu = self.picked.adc.get_mcu()
+        now = self.reactor.monotonic()
+        since = mcu.estimated_print_time(now)
+        end = now + timeout
+        while True:
+            if (self.picked.time > since and self.parked.time > since
+                    and cond()):
+                return True
+            if self.reactor.monotonic() >= end:
+                return False
+            self.reactor.pause(self.reactor.monotonic() + 0.010)
     def is_picked(self):
         return bool(self.picked.state)
     def is_parked(self):

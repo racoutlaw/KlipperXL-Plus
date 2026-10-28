@@ -58,7 +58,9 @@ DOCK_Y_MAX = 460.0             # wiggle overflow protection (Y max 461)
 SLOW_SPEED, TRAVEL_SPEED = 50., 200.      # mm/s
 PARKING_CURRENT, NORMAL_CURRENT = 0.950, 0.650   # A
 SAFE_Z = 20.0
-SENSOR_SETTLE = 0.3                       # s, released pause before reading
+# s, released pause before reading; pick / park: the longest wait for a
+# right reading (stock returns the instant it reads right)
+SENSOR_SETTLE = 0.3
 NUM_TOOLS = 5
 Z_ADJUST_MIN, Z_ADJUST_MAX = -0.3, 0.5   # released tool_offsets.py z_min/z_max
 # per filament type (owner 10/24): z_adjust_tN_abs / z_adjust_single_tN_abs
@@ -740,13 +742,11 @@ class XLToolchanger:
         self._queue(x=dock_x, y=SAFE_Y_WITHOUT_TOOL)
         self._queue(y=dock_y + PICK_Y_OFFSET)
         self._move(y=dock_y, speed=SLOW_SPEED)      # stop: sensor read
-        self._settle()
-        if not dock.is_picked():
+        if not dock.wait_until(dock.is_picked, SENSOR_SETTLE):
             gcmd.respond_info("Not picked, wiggling...")
             self._queue(y=dock_y + DOCK_WIGGLE, speed=SLOW_SPEED)
             self._move(y=dock_y, speed=SLOW_SPEED)
-            self._settle()
-            if not dock.is_picked():
+            if not dock.wait_until(dock.is_picked, SENSOR_SETTLE):
                 raise gcmd.error("T%d not detected as picked after wiggle!"
                                  % (tool,))
         self._xy_current(PARKING_CURRENT)
@@ -754,8 +754,7 @@ class XLToolchanger:
             self._queue(x=dock_x + off, speed=SLOW_SPEED)
         self._move(x=dock_x + PICK_X_OFFSETS[-1], speed=SLOW_SPEED)  # stop
         self._xy_current(NORMAL_CURRENT)
-        self._settle()
-        if dock.is_parked():
+        if not dock.wait_until(lambda: not dock.is_parked(), SENSOR_SETTLE):
             gcmd.respond_info("WARNING: T%d still reporting parked after lock!"
                               % (tool,))
         self._queue(y=SAFE_Y_WITH_TOOL)    # tool out - no stop (stock)
@@ -800,13 +799,11 @@ class XLToolchanger:
         self._move(x=dock_x + PARK_X_OFFSET_3, speed=SLOW_SPEED)   # stop
         self._xy_current(NORMAL_CURRENT)
         self._move(x=dock_x, y=dock_y, speed=SLOW_SPEED)   # stop: sensor read
-        self._settle()
-        if not dock.is_parked():
+        if not dock.wait_until(dock.is_parked, SENSOR_SETTLE):
             gcmd.respond_info("Not parked, wiggling...")
             self._queue(x=dock_x - DOCK_WIGGLE, speed=SLOW_SPEED)
             self._move(x=dock_x, speed=SLOW_SPEED)
-            self._settle()
-            if not dock.is_parked():
+            if not dock.wait_until(dock.is_parked, SENSOR_SETTLE):
                 # still the active tool: give back what the park took away
                 # above, or a later T<n> ("already picked") prints without
                 # its offset and loadcell

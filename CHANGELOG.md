@@ -117,8 +117,11 @@ for ABS: +0.020`). `SET_TOOL_Z_OFFSET` / `SAVE_TOOL_Z_OFFSET` take
 **Faster tool changes.** Pick and park now run their moves back to back and
 stop only where stock Prusa firmware stops: in front of the dock, after the
 lock moves and where a dock sensor is read. Before, the head stopped after
-every move - 13 times per tool change, now 6. A tool change takes about 2 s
-less (10.5 s -> 8.4 s on average in our tests); the moves themselves
+every move - 13 times per tool change, now 6. At each of the 3 dock sensor
+checks in a tool change the head goes on as soon as the sensor reads right,
+as stock does, instead of always waiting 0.3 s; a sensor that doesn't read
+right within 0.3 s gets the same wiggle as before. A tool change takes about
+2.6 s less (10.5 s -> 7.8 s on average in our tests); the moves themselves
 (positions, speeds, motor currents) and every sensor check are unchanged.
 
 **After this update** Mainsail asks you to finish it with the installer page
