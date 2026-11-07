@@ -84,6 +84,11 @@ BEDLET_SIZE = 90.
 # Prusa defaults (ref l.2085-2087)
 GRADIENT_CUTOFF = 2.0
 GRADIENT_EXPONENT = 2.0
+# Bed frame temperature estimate + "Absorbing heat" (stock temperature.cpp:
+# bed_frame_est_celsius l.659-680, init_bed_frame_est_celsius l.1388,
+# wait_for_frame_heatup l.1400 - G29 G in the XL start code, before MBL)
+FRAME_ROOM_TEMP = 25.           # room_temperature
+FRAME_FINISH = 1.               # finish_threshold
 
 
 def crc16_modbus(data):
@@ -274,6 +279,11 @@ class XLPuppies:
         self.bed_area = None
         self.bed_zones = None         # SET_BED_ZONES: chosen bedlets (mask)
         self.bed_mask = 0xFFFF
+        self.frame_mask = 0xFFFF      # stock temp_bed.enabled_mask (unexpanded)
+        self.frame_est = None         # stock bed_frame_est_celsius
+        self._frame_time = 0.
+        self._absorbing = False       # XL_ABSORB_HEAT is waiting
+        self._absorb_end = None       # 'skip' / 'cancel' from Mainsail
         self.bed_faults_cleared = False
         self._bed_last = 0.
         self._poll_count = 0
@@ -314,7 +324,8 @@ class XLPuppies:
         self.printer.register_event_handler("klippy:shutdown",
                                             self._handle_shutdown)
         for cmd in ('M140', 'M190', 'SET_BED_AREA', 'CLEAR_BED_AREA',
-                    'SET_BED_ZONES', 'BED_STATUS', 'RS485_STATS'):
+                    'SET_BED_ZONES', 'BED_STATUS', 'RS485_STATS',
+                    'XL_ABSORB_HEAT'):
             self.gcode.register_command(cmd, getattr(self, 'cmd_' + cmd),
                                         desc=getattr(self, 'cmd_%s_help'
                                                      % cmd, None))
@@ -488,6 +499,40 @@ class XLPuppies:
                     logging.warning("xl_puppies: bed boot: %s", e)
         self.reactor.update_timer(self._poll_timer, self.reactor.NOW)
         self.reactor.update_timer(self._stats_timer, self.reactor.NOW)
+        self._wrap_print_requests()
+    # Stock, while it absorbs heat: the print screen's Pause button is Skip
+    # (screen_printing.cpp pauseAction, SKIPPABLE_OPERATION) and Stop ends
+    # the wait at once (marlin_server.cpp Aborting_Begin: request_skip).
+    # Mainsail's Pause / Cancel come as webhooks that run PAUSE /
+    # CANCEL_PRINT as G-code, which would wait behind XL_ABSORB_HEAT - so
+    # the wait hears of them first.  Klipper's webhooks keep the handlers in
+    # WebHooks._endpoints (no public way to wrap one); without it, no Skip.
+    def _wrap_print_requests(self):
+        webhooks = self.printer.lookup_object('webhooks')
+        endpoints = getattr(webhooks, '_endpoints', None)
+        if not isinstance(endpoints, dict):
+            logging.warning("xl_puppies: webhooks endpoints not found -"
+                            " Absorbing heat cannot be skipped")
+            return
+        for path, end in (('pause_resume/pause', 'skip'),
+                          ('pause_resume/cancel', 'cancel')):
+            orig = endpoints.get(path)
+            if orig is None or getattr(orig, 'xl_absorb', False):
+                continue
+            def wrapper(web_request, orig=orig, end=end):
+                if self.absorb_request(end) and end == 'skip':
+                    return            # stock: Pause is Skip during the wait
+                orig(web_request)
+            wrapper.xl_absorb = True
+            endpoints[path] = wrapper
+    # The same two requests from the XL's own screen (xl_display)
+    def absorbing(self):
+        return self._absorbing
+    def absorb_request(self, end):
+        if not self._absorbing:
+            return False
+        self._absorb_end = end
+        return True
     # Every 5 s, also after a shutdown (the command is allowed there)
     def _log_stats(self, eventtime):
         text = self.bus.stats_text()
@@ -517,6 +562,7 @@ class XLPuppies:
         if regs is not None:
             self.bed_measured = {i: (v - 0x10000 if v >= 0x8000 else v)
                                  / BED_TEMP_SCALE for i, v in enumerate(regs)}
+            self._update_frame(self.reactor.monotonic())
         self._check_faults()
         return self.reactor.monotonic() + self.poll_interval
     def _check_faults(self):
@@ -553,6 +599,32 @@ class XLPuppies:
         if not temps:
             temps = list(self.bed_measured.values())
         return sum(temps) / len(temps) if temps else 0.
+    # Stock's bed frame estimate: the print area's average temperature
+    # (updateModularBedTemperature, enabled bedlets only), which the frame
+    # follows at most (0.06 + (100 - T) * 0.0015) C per second
+    def _frame_bed_temp(self):
+        temps = [self.bed_measured[i] for i in range(NUM_BEDLETS)
+                 if self.frame_mask & (1 << i) and i in self.bed_measured]
+        return sum(temps) / len(temps) if temps else 0.
+    def _frame_init(self):
+        t = self._frame_bed_temp()
+        self.frame_est = (t if t < FRAME_ROOM_TEMP else
+                          FRAME_ROOM_TEMP + (t - FRAME_ROOM_TEMP) * 0.7)
+    def _update_frame(self, now):
+        t = self._frame_bed_temp()
+        if t > 0.:
+            if self.frame_est is None:
+                self._frame_init()
+            else:
+                step = (0.06 + (100. - t) * 0.0015) * (now - self._frame_time)
+                self.frame_est += min(max(t - self.frame_est, -step), step)
+        self._frame_time = now
+    def _set_frame_mask(self, mask):
+        # stock setEnabledBedletMask: another print area starts the estimate
+        # again from the average it had (init_bed_frame_est_celsius)
+        if mask != self.frame_mask and self.frame_est is not None:
+            self._frame_init()
+        self.frame_mask = mask
     def _area_mask(self, x0, y0, x1, y1):
         mask = 0
         for r in range(4):
@@ -677,6 +749,7 @@ class XLPuppies:
             raise gcmd.error("Invalid bed area")
         self.bed_area = (x0, y0, x1, y1)
         self.bed_zones = None         # the print's area wins over a choice
+        self._set_frame_mask(self._area_mask(*self.bed_area))
         self.bed_mask = self._expand_to_sides(self._area_mask(*self.bed_area))
         if self.bed_target > 0:
             self.set_bed_target(self.bed_target)
@@ -686,6 +759,7 @@ class XLPuppies:
     def cmd_CLEAR_BED_AREA(self, gcmd):
         self.bed_area = None
         self.bed_zones = None
+        self._set_frame_mask(0xFFFF)
         self.bed_mask = 0xFFFF
         if self.bed_target > 0:
             self.set_bed_target(self.bed_target)
@@ -731,6 +805,7 @@ class XLPuppies:
                              % (target, self.bed_max_temp))
         self.bed_area = None
         self.bed_zones = None if mask == 0xFFFF else mask
+        self._set_frame_mask(mask)
         self.bed_mask = mask
         self.set_bed_target(target)
         names = ("all 16 bedlets" if mask == 0xFFFF else ", ".join(
@@ -752,6 +827,79 @@ class XLPuppies:
             lines.append("  " + "  ".join(cells))
         lines.append("  FRONT / LCD")
         gcmd.respond_info("\n".join(lines))
+    cmd_XL_ABSORB_HEAT_help = ("Wait until the bed frame has taken the bed's"
+                               " heat (stock G29 G, before the bed mesh)")
+    def cmd_XL_ABSORB_HEAT(self, gcmd):
+        # stock wait_for_frame_heatup: until the frame estimate is within
+        # 1 C of the bed target; not for a cooling bed or one at room
+        # temperature.  As stock: Pause skips it, Cancel ends the print at
+        # once (_wrap_print_requests); a pause that is not a command
+        # (filament runout: virtual_sdcard must_pause_work) ends it too.
+        if self.frame_est is None:
+            gcmd.respond_info("Absorbing heat: no bed reading yet - skipped")
+            return
+        target = self.bed_target
+        if abs(target - self.frame_est) < FRAME_FINISH:
+            gcmd.respond_info("Absorbing heat: already stable, continuing")
+            return
+        if target < self.frame_est:
+            gcmd.respond_info("Absorbing heat: target lower than actual temp,"
+                              " continuing")
+            return
+        if target <= FRAME_ROOM_TEMP:
+            gcmd.respond_info("Absorbing heat: target below soak threshold"
+                              " %.0f, continuing" % (FRAME_ROOM_TEMP,))
+            return
+        sd = self.printer.lookup_object('virtual_sdcard', None)
+        start_target = target
+        start_diff = abs(start_target - self.frame_est) - FRAME_FINISH
+        gcmd.respond_info("Absorbing heat: bed frame about %.1f C, bed %.0f C"
+                          " (Pause skips it)" % (self.frame_est, target))
+        t0 = eventtime = self.reactor.monotonic()
+        progress, shown = 0., -1
+        self._absorb_end = None
+        self._absorbing = True
+        try:
+            while abs(self.bed_target - self.frame_est) > FRAME_FINISH:
+                if self._absorb_end == 'skip':
+                    gcmd.respond_info("Absorbing heat: skipped after %.0f s"
+                                      % (eventtime - t0,))
+                    return
+                if self._absorb_end == 'cancel':
+                    # stock Stop: the print ends now.  Cancelling the SD
+                    # print here records it as cancelled; the error stops
+                    # START_PRINT; Mainsail's CANCEL_PRINT runs after it.
+                    if sd is not None:
+                        sd.do_cancel()
+                    raise gcmd.error("Absorbing heat: print cancelled")
+                if self.printer.is_shutdown() or (sd is not None
+                                                  and sd.must_pause_work):
+                    gcmd.respond_info("Absorbing heat: stopped after %.0f s"
+                                      % (eventtime - t0,))
+                    return
+                if start_target != self.bed_target:
+                    start_target = self.bed_target
+                    start_diff = (abs(start_target - self.frame_est)
+                                  - FRAME_FINISH)
+                if start_diff > 0.:
+                    left = (abs(self.bed_target - self.frame_est)
+                            - FRAME_FINISH)
+                    progress = max(progress, min(max(
+                        100. - left / start_diff * 100., 0.), 100.))
+                if int(progress) != shown:
+                    shown = int(progress)
+                    self.gcode.run_script_from_command(
+                        "M117 Absorbing heat %d%%" % (shown,))
+                eventtime = self.reactor.pause(eventtime + 1.)
+            gcmd.respond_info("Absorbing heat: done after %.0f s"
+                              % (eventtime - t0,))
+        finally:
+            self._absorbing = False
+            self._absorb_end = None
+            try:
+                self.gcode.run_script_from_command("M117")
+            except self.printer.command_error:
+                pass
     def get_status(self, eventtime):
         return {'modular_bed_booted': self.modular_bed_booted,
                 'bed_target': self.bed_target,
@@ -760,6 +908,8 @@ class XLPuppies:
                                if self.bed_zones & (1 << i)]
                               if self.bed_zones is not None else None),
                 'bed_mask': self.bed_mask,
+                'bed_frame_est': (round(self.frame_est, 1)
+                                  if self.frame_est is not None else None),
                 'reset_lines': self.reset_value}
 
 def load_config(config):

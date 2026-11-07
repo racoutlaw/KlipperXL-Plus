@@ -140,6 +140,73 @@ briefly read "empty" and then "inserted" - and autoload ran on a tool that
 was already loaded. Now the XLBuddy reports when the switch really happened,
 and the first step sets the switch fully.
 
+**The stock XL screen now works with KlipperXL-Plus.** The XL's own colour
+screen and knob look and work like a stock XL's - Prusa's own icons, font,
+colours and layout:
+- **Home**: Print, Preheat, Filament, Control and Info, with the clock,
+  nozzle and bed temperatures, the bedlet grid and the loaded filament.
+- **Print**: the files on the Pi, newest first. Before a print starts the
+  screen asks, and if the file wants a different filament than a tool has
+  loaded it says so, with Back selected.
+- **Print screen**: progress and time left, **Tune** (Change, Load and Purge
+  Filament, speed, nozzle, bed, fan, Live Z, flow), Pause / Resume and Stop;
+  at the end Finished, with **Reprint**.
+- **Filament**: Load and Unload per tool, asking the filament type as stock
+  does. A change of the same filament keeps the tool's type and its Z
+  fine-tune, and the screen follows an autoload when filament is fed into an
+  empty tool.
+- **Preheat**: a filament type, then one tool or all of them, and Cooldown.
+- **Control**: Auto Home, Move Axis, Disable Motors, Pick / Park Tool.
+- **Info**: network, versions and sensors.
+
+**First start, setup and calibrations still need Mainsail** (or
+KlipperScreen): the installer page, the calibration wizards and settings are
+not on the XL's screen - its Settings tile has no page. The knob does
+everything; the screen is not used as a touch screen.
+
+The XLBuddy firmware draws the screen, so it needs the new XLBuddy firmware:
+after this update Mainsail says the XLBuddy needs it, and the installer page
+builds it and takes you through the flash. Until then the screen stays as it
+was. Nothing to add to `printer.cfg` - `[xl_display]` is in `xl_base.cfg`
+now (a `[xl_display]` you added yourself for the first step does no harm).
+
+**No blob on top of a finished print.** At the end of a print the tool
+pulled its filament out of the nozzle (about 17 s) while still just above
+the last spot of the print, and the plastic that sequence pushes out first
+left a blob on the part. Now, as stock Prusa firmware does on a 5-tool XL,
+the head lifts, goes to the back and parks the tool, and nothing is pulled
+out; the slicer's small retract is still remembered and given back on that
+tool's next print. A cancel still pulls the filament out, as stock does, but
+after the 20 mm lift and the move to the back.
+
+**Bed mesh taps come down slower, as stock.** Each mesh point (and `PROBE`)
+now comes down to the bed at stock's 70 mm/min (1.17 mm/s). It used Klipper's
+default 5 mm/s - about four times stock and the original KlipperXL (1.0 mm/s) -
+so the nozzle pressed harder before the loadcell stopped it. Z homing (its
+slow taps are 0.5 mm/s) and the tool offsets (1 mm/s) are unchanged. A full
+mesh takes about half a minute longer. The installer puts it in each tool's
+file.
+
+**A print start homes X and Y once, as stock.** `G28 Z` homed Y and X again
+before probing Z even when they were already homed, so every print start
+bumped Y and X, picked the tool, then bumped Y and X again. Now Z homes alone
+when X and Y are known, as stock's start code does (`G28 XY`, pick the tool,
+`G28 Z`). A print starts about 20 s sooner. A plain `G28`, or `G28 Z` with X
+or Y not homed, homes them as before.
+
+**The bed soaks before the mesh, as stock ("Absorbing heat").** Stock waits
+before probing the bed until its estimate of the bed frame's temperature has
+caught up with the bed (`G29 G` in the XL start code). KlipperXL-Plus meshed a
+minute or two after the bed reached its temperature, while the bed was still
+moving: in our test the middle sank up to 0.08 mm over the next 10 minutes.
+Now `START_PRINT` waits the same way after the Z home, with stock's frame
+estimate, and Mainsail shows "Absorbing heat" with a percentage. From a cold
+bed that is about 3 minutes at 60 C (2.7 in our test) and about 15 at 100 C;
+a warm bed waits less, a soaked one not at all. As on stock's screen, where
+the Pause button turns into Skip during the wait: **Pause** in Mainsail skips
+it and the print goes on to the mesh; **Cancel** ends the print at once.
+`XL_ABSORB_HEAT` runs it by hand.
+
 **After this update** Mainsail asks you to finish it with the installer page
 (it adds the bed's `[heater_bed]` section, the new grid page, the longer
 loadcell zeroing in each tool's file, the new Load / Unload buttons and the

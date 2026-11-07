@@ -71,6 +71,24 @@ lights - and the XLBuddy's Klipper firmware is the bridge to them on the
 printer's RS485 bus. Each tool is a normal Klipper extruder (`[extruderN]`),
 so Klipper's own PID, pressure advance and heater handling work per tool.
 
+### The stock XL screen works
+The XL's own colour screen and knob look and work like a stock XL's -
+Prusa's own icons, font and layout:
+- **Home**: Print, Preheat, Filament, Control and Info, with the clock,
+  temperatures, the bedlet grid and the loaded filament
+- **Print** a file from the Pi; if the file wants a different filament than
+  a tool has loaded, the screen says so before it starts
+- **Print screen**: progress and time left, **Tune** (Change, Load and Purge
+  Filament, speed, nozzle, bed, fan, Live Z, flow), Pause / Resume, Stop, and
+  **Reprint** when it is done
+- **Filament** load and unload per tool, **Preheat** one tool or all,
+  **Control** (home, move, motors off, pick / park tools), **Info**
+
+**First start, setup and calibrations still need Mainsail** (or
+KlipperScreen): the installer page, the calibration wizards and settings are
+not on the XL's screen. The knob does everything; the screen is not used as a
+touch screen.
+
 ### Install from one SD card - no command line
 - **Raspberry Pi Imager** writes the KlipperXL-Plus image (MainsailOS +
   KlipperXL-Plus), with your Wi-Fi and user set in Imager
@@ -297,6 +315,9 @@ installed when you choose it, and the LED effects use
 [klipper-led_effect](https://github.com/julianschill/klipper-led_effect).
 Printer behaviour and constants follow Prusa Research's
 [Prusa-Firmware-Buddy](https://github.com/prusa3d/Prusa-Firmware-Buddy). The
+XL screen uses Prusa Research's own icons, font images and screen design from
+Prusa-Firmware-Buddy 6.10.3 (graphics and design: CC BY-NC-SA 4.0; font:
+Liberation Mono, SIL Open Font License). The
 pressure advance analysis is CNC Kitchen's
 [PrusaPATuner](https://github.com/CNCKitchen/PrusaPATuner) (Stefan Hermann,
 AGPL-3.0, in [pa_analysis/](pa_analysis/), run as a separate program).
@@ -313,6 +334,13 @@ Copyright (C) 2026 Richard Crook
 GNU General Public License v3 or later - see [LICENSE](LICENSE). The pressure
 advance analyser in `pa_analysis/prusa_pa_tuner/` keeps its own license
 (AGPL-3.0 or later).
+
+The XL screen's look - Prusa's icons, font images and screen design, packed in
+`firmware/xlbuddy/xl_lcd_assets.bin` and laid out by
+`klippy/extras/xl_display.py` - is Prusa Research's and keeps Prusa's license
+for graphics and design:
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+(credit Prusa Research, no commercial use, share changes alike).
 
 ## Disclaimer
 

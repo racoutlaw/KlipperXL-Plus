@@ -27,16 +27,25 @@
 #   [xl_filament]
 #   #autoload: True
 #
-# Commands: LOAD_FILAMENT [TOOL=n] [TEMP=t]
+# Commands: LOAD_FILAMENT [TOOL=n] [TEMP=t] [TYPE=PLA..]
+#           PURGE_FILAMENT [TOOL=n]           (in a pause)
 #           UNLOAD_FILAMENT [TOOL=n] [TEMP=t] [ASK=1]
 #           AUTOLOAD_FILAMENT [TOOL=n]        SET_AUTOLOAD [ENABLE=0|1]
 #           M600 [T=n]                        M591 [S=0|1] (runout off/on)
 #           XL_FILAMENT_TYPE TOOL=n TYPE=ABS | TEMP=t | CANCEL=1
-# TEMP absent or 0: the tool's current target.  Else a load asks for the
-# filament type once the gears have the filament (stock M1701: Mainsail /
-# KlipperScreen pop-up, XL_FILAMENT_TYPE carries on); an unload uses the
-# loaded filament's temperature - not known: with ASK=1 (the Unload buttons)
-# it asks first, else 215 C (DEFAULT_TEMP).
+# Outside a print a load without TEMP always asks for the filament type once
+# the gears have the filament, hot nozzle or not (stock M701 / M1701: Mainsail /
+# KlipperScreen pop-up, XL_FILAMENT_TYPE carries on), and an unload clears the
+# type and turns the nozzle off (stock M702).  So the type's Z fine-tune comes
+# back with the type.  During a print (M600, a runout) the tool keeps its type,
+# its Z fine-tune and the temperature that is set (stock M600: "same filament
+# type as currently loaded"), a load runs without asking.  LOAD_FILAMENT TYPE=
+# in a pause is a different filament: it loads hot enough for the new one and
+# what is left of the old (stock preheat_to), saves the new type, whose Z
+# fine-tune then applies, and goes back to the print's temperature for RESUME.
+# An unload uses the
+# tool's target, else the loaded filament's temperature - not known: with ASK=1
+# (the Unload buttons) it asks first, else 215 C (DEFAULT_TEMP).
 # xl_macros.cfg wraps LOAD_FILAMENT / UNLOAD_FILAMENT in gcode_macros of the
 # same name (rename_existing) - KlipperScreen only shows its Load/Unload
 # buttons for macros.  TOOL other than the picked one is refused while a
@@ -140,10 +149,13 @@ class XLFilament:
         self._tracked = [TRACK_MAX] * NUM_TOOLS   # retract tracker, mm back
         self._track_ok = [False] * NUM_TOOLS      # retract tracker trusted
         self._asking = {}                 # tool -> (mode, keep_hot): type asked
+        self._step = None                 # the XL's screen: (mode, tool, step)
+        self._note = None                 # the XL's screen: how it ended
         self._gm = None
         for cmd, desc in (
                 ('LOAD_FILAMENT', "Load filament into a tool (Prusa M701)"),
                 ('UNLOAD_FILAMENT', "Unload filament from a tool (Prusa M702)"),
+                ('PURGE_FILAMENT', "Purge the picked tool during a pause"),
                 ('AUTOLOAD_FILAMENT', "Run the autoload sequence for a tool"),
                 ('SET_AUTOLOAD', "Enable/disable filament autoload"),
                 ('M600', "Filament change: pause, unload, then load + RESUME"),
@@ -189,6 +201,16 @@ class XLFilament:
                 sv.allVariables.get('fs_runout_enabled', 1))
         logging.info("xl_filament: runout detection %s",
                      "enabled" if self.runout_enabled else "disabled")
+    # What the XL's own screen shows (xl_display.py)
+    def screen_step(self):
+        return self._step if self._in_progress else None
+    def screen_ask(self):
+        for tool in sorted(self._asking):
+            return tool, self._asking[tool][0]
+        return None
+    def screen_note(self):
+        note, self._note = self._note, None
+        return note
     # helpers
     def _installed(self, tool):
         return (0 <= tool < NUM_TOOLS and self.printer.lookup_object(
@@ -268,12 +290,14 @@ class XLFilament:
         if sv is None:
             return
         value = {'type': ftype, 'temp': temp} if temp else 0
+        same = self._filament(tool)[0].upper() == ftype.upper()
         sv.cmd_SAVE_VARIABLE(self.gcode.create_gcode_command(
             "SAVE_VARIABLE", "SAVE_VARIABLE",
             {"VARIABLE": 'filament_t%d' % (tool,), "VALUE": repr(value)}))
-        # the picked tool's Z fine-tune follows its filament type
+        # the picked tool's Z fine-tune follows its filament type; the same
+        # type leaves the Z offset alone, Live Adjust Z included
         tc = self.printer.lookup_object('xl_toolchanger', None)
-        if tc is not None:
+        if tc is not None and not same:
             tc.filament_changed(tool)
     def _e_move(self, mm, speed, accel=E_ACCEL):
         toolhead = self.printer.lookup_object('toolhead')
@@ -384,7 +408,13 @@ class XLFilament:
         self._set_melt(tool, 0)
     # the load sequence (release _do_autoload).  arrived: when the filament
     # has reached the tool sensor - by default its calibrated state.
-    def _load(self, tool, temp, arrived=None, autoload=False):
+    def _type_param(self, gcmd):
+        ftype = gcmd.get('TYPE', '').upper()
+        if ftype and ftype not in dict(FILAMENT_TEMPS):
+            raise gcmd.error("TYPE must be one of %s"
+                             % (", ".join(n for n, _ in FILAMENT_TEMPS),))
+        return ftype
+    def _load(self, tool, temp, arrived=None, autoload=False, ftype=''):
         ask = self._asking.get(tool)
         if ask is not None and ask[0] == 'load':
             # its filament is already in the gears, waiting for the type
@@ -400,8 +430,11 @@ class XLFilament:
                 self.gcode.respond_info(
                     "T%d: Tool sensor not calibrated - run"
                     " CALIBRATE_FILAMENT_SENSOR TOOL=%d first" % (tool, tool))
+                self._note = ("The tool sensor is not calibrated. Run"
+                              " CALIBRATE_FILAMENT_SENSOR from Mainsail.")
                 return False
             arrived = lambda: fs.state == 'has_filament'
+        self._step = ('load', tool, 'tool')
         self._pick(tool)
         # stock M1701 (pause.cpp l.408-413): an autoload whose filament is
         # already at the tool sensor (pushed in while the tool was picked)
@@ -411,11 +444,14 @@ class XLFilament:
         if at_sensor and not autoload:
             self.gcode.respond_info("T%d: Sensor already reads filament -"
                                     " check filament is removed" % (tool,))
+            self._note = ("The tool sensor already reads filament. Please"
+                          " remove filament from filament sensor.")
             return False
         keep_hot = self._print_state() == 'paused'
         # stock: to the front (Y -7, Z up) before the filament goes in, print
         # fan off while loading
         self.gcode.respond_info("T%d: to the front for loading..." % (tool,))
+        self._step = ('load', tool, 'park')
         self._park_front(PARK_Z_LOAD)
         self._fan_hold(tool, True)
         # cold extrusion for the whole sequence (release / Prusa
@@ -424,6 +460,7 @@ class XLFilament:
         heater, saved_min = self._cold_ok(tool)
         try:
             # 1: assist insertion - extruder turns, stop on the tool sensor
+            self._step = ('load', tool, 'push')
             if at_sensor:
                 self.gcode.respond_info("T%d: filament already at the tool"
                                         " sensor - into the gears" % (tool,))
@@ -436,40 +473,72 @@ class XLFilament:
                     self.gcode.respond_info(
                         "T%d: Tool sensor not triggered after %.0fs -"
                         " aborting" % (tool, ASSIST_TIMEOUT))
+                    self._note = ("The tool sensor did not see filament. Make"
+                                  " sure the filament is inserted through the"
+                                  " sensor.")
                     return False
                 self._e_move(ASSIST_CHUNK, ASSIST_SPEED)
             self.gcode.respond_info("T%d: Filament at tool sensor" % (tool,))
             # 1b: slow load into the gears (cold)
+            self._step = ('load', tool, 'gears')
             self._e_move(*SLOW_LOAD)
             # stock M1701: "catch filament in gear and then ask for temp" -
-            # no TEMP and the tool not heating: ask, stop here with the
-            # filament in the gears; XL_FILAMENT_TYPE carries on
-            temp = self._target(tool, temp)
+            # no TEMP: ask, stop here with the filament in the gears;
+            # XL_FILAMENT_TYPE carries on.  In a pause (stock M600) the
+            # temperature that is set, or the one of the type the tool has.
+            saved = back_to = None
+            if ftype:
+                saved = float(dict(FILAMENT_TEMPS)[ftype])
+            if keep_hot:
+                set_temp = self._target(tool, temp)
+                old_type, old_temp = self._filament(tool)
+                if ftype and ftype != old_type.upper():
+                    # stock preheat_to: "the remnants in the nozzle will melt
+                    # enough to allow the load", 250 when the old is not known
+                    temp = max(saved, old_temp or 250., set_temp)
+                    if set_temp >= MIN_TEMP:
+                        back_to = set_temp
+                else:
+                    ftype, saved = '', None
+                    temp = set_temp if set_temp >= MIN_TEMP else old_temp
+            elif saved is not None and temp <= 0.:
+                temp = saved
             if temp < MIN_TEMP:
                 self._ask_type(tool, 'load', keep_hot)
                 return True
-            self._load_rest(tool, temp, '', keep_hot)
+            self._load_rest(tool, temp, ftype, keep_hot, saved, back_to)
             return True
         finally:
             heater.min_extrude_temp = saved_min
             self._fan_hold(tool, False)
-    def _load_rest(self, tool, temp, ftype, keep_hot):
+    def _load_rest(self, tool, temp, ftype, keep_hot, saved=None, back_to=None):
         # 2: heat
+        self._step = ('load', tool, 'heat')
         self.gcode.respond_info("T%d: Heating to %.0fC..." % (tool, temp))
         self.gcode.run_script_from_command("M109 T%d S%.0f" % (tool, temp))
         # 3-5: fast load, purge, retract
+        self._step = ('load', tool, 'nozzle')
         self.gcode.respond_info("T%d: Fast loading to nozzle..." % (tool,))
         self._e_move(FAST_LOAD[0], FAST_LOAD[1], FAST_LOAD_ACCEL)
+        self._step = ('load', tool, 'purge')
         self.gcode.respond_info("T%d: Purging..." % (tool,))
         self._e_move(*PURGE)
         self._e_move(-LOAD_RETRACT[0], LOAD_RETRACT[1])
         self._clear_melt_retract(tool)
-        self._set_filament(tool, ftype, temp)
+        # stock M600: a change in a pause leaves the tool's type as it is
+        if not (keep_hot and not ftype and self._filament(tool)[1]):
+            self._set_filament(tool, ftype, saved or temp)
         if keep_hot:
             # stock load_prime_process (filament change): 4 mm back in,
             # then the pause retract again - RESUME gives that 1 mm back
             self._e_move(LOAD_RETRACT[0], 10.)
             self._e_move(-PAUSE_RETRACT[0], PAUSE_RETRACT[1])
+            if back_to is not None:
+                self._step = ('load', tool, 'heat')
+                self.gcode.respond_info("T%d: back to the print's %.0fC..."
+                                        % (tool, back_to))
+                self.gcode.run_script_from_command("M109 T%d S%.0f"
+                                                   % (tool, back_to))
             self.gcode.respond_info("T%d: Print is paused - heater left"
                                     " on for RESUME" % (tool,))
         else:
@@ -480,6 +549,7 @@ class XLFilament:
                 self.gcode.respond_info("T%d: %s stays in the nozzle (stock:"
                                         " no auto retract)" % (tool, ftype))
             else:
+                self._step = ('load', tool, 'retract')
                 self.gcode.respond_info("T%d: pulling the filament out of"
                                         " the nozzle (stock auto"
                                         " retract)..." % (tool,))
@@ -532,10 +602,44 @@ class XLFilament:
         tool = self._tool_param(gcmd)
         if self._in_progress:
             raise gcmd.error("A load is already in progress")
+        ftype = self._type_param(gcmd)
         self._in_progress = True
         try:
-            self._load(tool, gcmd.get_float('TEMP', 0.))
+            self._load(tool, gcmd.get_float('TEMP', 0.), ftype=ftype)
         finally:
+            self._in_progress = False
+    # Stock Purge Filament (M701 L0), for a pause: the filament that was just
+    # loaded did not come out clean.  To the front, the temperature that is set
+    # or the one of the type the tool has, out, then ready for RESUME as a load
+    # in a pause leaves it.
+    def cmd_PURGE_FILAMENT(self, gcmd):
+        tool = self._tool_param(gcmd)
+        if self._in_progress:
+            raise gcmd.error("A load is already in progress")
+        if self._print_state() != 'paused':
+            raise gcmd.error("PURGE_FILAMENT: only while a print is paused")
+        temp = self._target(tool, 0.)
+        if temp < MIN_TEMP:
+            temp = self._filament(tool)[1]
+        if temp < MIN_TEMP:
+            raise gcmd.error("T%d: no temperature set and its filament type is"
+                             " not known" % (tool,))
+        self._in_progress = True
+        try:
+            self._step = ('purge', tool, 'park')
+            self._park_front(PARK_Z_LOAD)
+            self._fan_hold(tool, True)
+            self._step = ('purge', tool, 'heat')
+            self.gcode.run_script_from_command("M109 T%d S%.0f" % (tool, temp))
+            self._step = ('purge', tool, 'purge')
+            self.give_back(tool)
+            gcmd.respond_info("T%d: Purging..." % (tool,))
+            self._e_move(*PURGE)
+            self._e_move(-LOAD_RETRACT[0], LOAD_RETRACT[1])
+            self._e_move(LOAD_RETRACT[0], 10.)
+            self._e_move(-PAUSE_RETRACT[0], PAUSE_RETRACT[1])
+        finally:
+            self._fan_hold(tool, False)
             self._in_progress = False
     def cmd_AUTOLOAD_FILAMENT(self, gcmd):
         tool = self._tool_param(gcmd)
@@ -592,9 +696,12 @@ class XLFilament:
             if cancel:
                 gcmd.respond_info("T%d: taking the filament back out of the"
                                   " gears..." % (tool,))
+                self._step = ('unload', tool, 'unload')
                 self._e_move(-GEARS_OUT[0], GEARS_OUT[1])
                 gcmd.respond_info("T%d: load cancelled - pull the filament"
                                   " out" % (tool,))
+                self._note = ("Load cancelled. Pull the filament out of the"
+                              " extruder.")
             else:
                 self._load_rest(tool, temp, ftype, keep_hot)
         finally:
@@ -632,8 +739,10 @@ class XLFilament:
     def _unload(self, gcmd, tool, temp):
         if self._asking.pop(tool, None) is not None:
             self.gcode.respond_raw("// action:prompt_end")
+        self._step = ('unload', tool, 'tool')
         self._pick(tool)
         gcmd.respond_info("T%d: to the front for unloading..." % (tool,))
+        self._step = ('unload', tool, 'park')
         self._park_front(PARK_Z_UNLOAD)
         self._fan_hold(tool, True)
         heater = saved_min = None
@@ -645,16 +754,19 @@ class XLFilament:
                 rammed = pulled
             else:
                 temp = self._temp(tool, temp)
+                self._step = ('unload', tool, 'heat')
                 gcmd.respond_info("Heating T%d to %.0fC for unload..."
                                   % (tool, temp))
                 self.gcode.run_script_from_command("M109 T%d S%.0f"
                                                    % (tool, temp))
                 seq = (RUNOUT_RAM_SEQ if self._print_state() in
                        ('printing', 'paused') else UNLOAD_RAM_SEQ)
+                self._step = ('unload', tool, 'ram')
                 gcmd.respond_info("Ramming...")
                 self._run_seq(seq)
                 rammed = self._seq_retracted(seq)
             heater, saved_min = self._cold_ok(tool)
+            self._step = ('unload', tool, 'unload')
             gcmd.respond_info("Retracting filament...")
             rest = max(UNLOAD_LENGTH - rammed, 0.)
             if rest:
@@ -664,7 +776,12 @@ class XLFilament:
                 heater.min_extrude_temp = saved_min
             self._fan_hold(tool, False)
         self._clear_melt_retract(tool)
-        self._set_filament(tool, '', 0)
+        if self._print_state() not in ('printing', 'paused'):
+            # stock M702 (M70X_process_user_response CooledDown): the next load
+            # starts from a cold nozzle and asks.  In a print the tool keeps
+            # its type and the print's temperature, for the load and RESUME.
+            self._set_filament(tool, '', 0)
+            self.gcode.run_script_from_command("M104 T%d S0" % (tool,))
         fs = self._fsensor(tool)
         # a reading taken after the pull, not the last one before it
         # (printer 10/11: 'still reads has_filament' right after a good unload)
@@ -688,6 +805,7 @@ class XLFilament:
             # filament slid out with a clean tip.  Not a warning.
             gcmd.respond_info("T%d: unloaded - pull the filament out of the"
                               " extruder" % (tool,))
+            self._note = "Please remove filament from filament sensor."
     # stock marlin_server.cpp pre_finalize_print (print end and cancel): the
     # retract tracker's distances saved, then AutoRetract::
     # maybe_retract_from_nozzle - the picked tool, if hot and not already
@@ -696,7 +814,9 @@ class XLFilament:
         self._save_tracked(gcmd)
         tc = self.printer.lookup_object('xl_toolchanger')
         tool = gcmd.get_int('TOOL', tc.active_tool)
-        if tool < 0 or tool != tc.active_tool:
+        if tool < 0:
+            return      # stock: no tool picked (END_PRINT parks first)
+        if tool != tc.active_tool:
             gcmd.respond_info("Auto retract: T%s is not on the carriage -"
                               " skipped" % (tool,))
             return
